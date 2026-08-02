@@ -1318,39 +1318,67 @@ console.log('[DeepAnalyze] JS loaded');
             } else if (data.type === 'text') {
               var chunk = data.content;
 
+              // 中栏：节点工作内容（必须用原始内容检测——思考禁用时
+              // 正文会被下方 inThink 缓冲区吞掉，导致中栏收不到小节）
+              if (currentMeta && currentMeta.mode === 'distributed') {
+                var mSec = chunk.match(/^### 工作表「(.+?)」分析（节点：(.+?)）$/m);
+                var mOv = chunk.match(/^## 总览与综合结论/m);
+                if (mSec) {
+                  midCurrent = midAddCard(mSec[1], mSec[2], chunk.replace(/^### 工作表「(.+?)」分析（节点：(.+?)）\n/m, ''));
+                  midRender();
+                } else if (mOv) {
+                  midCurrent = midAddCard('总览与综合结论', '主节点', chunk.replace(/^## 总览与综合结论（主节点生成）\n/m, ''));
+                  midRender();
+                } else if (midCurrent) {
+                  midCurrent.raw += chunk;
+                  if (!window._midTimer) {
+                    window._midTimer = setTimeout(function () {
+                      window._midTimer = null;
+                      midRender();
+                    }, 300);
+                  }
+                }
+              }
+
               if (inThink) {
-                // Strip leading <think> from first chunk
-                if (thinkText === '' && chunk.indexOf(thinkOpener) === 0) {
-                  chunk = chunk.substring(thinkOpener.length);
-                }
-                // Accumulate into sliding buffer for cross-chunk boundary detection
-                thinkBuf += chunk;
-                thinkText += chunk;
-                chunk = '';
-
-                // Search for think end in the buffer (last 200 chars to avoid O(n²))
-                var searchStart = Math.max(0, thinkBuf.length - 200);
-                var searchText = thinkBuf.substring(searchStart);
-                var result = findThinkEnd(searchText);
-
-                if (result) {
-                  // Found the boundary — rewind thinkText to before the tag
-                  var globalIdx = searchStart + result.idx;
-                  var beforeTag = thinkBuf.substring(0, globalIdx);
-                  var afterTag = thinkBuf.substring(globalIdx + result.len);
-                  thinkText = beforeTag;
-                  chunk = afterTag;
-                  thinkBuf = '';
+                var hasThinkMarker = chunk.indexOf('<think') !== -1;
+                // 思考已禁用且首个正文块无思考标记 → 直接按正文处理，不再吞入思考缓冲区
+                if (thinkText === '' && !hasThinkMarker && chunk.trim() !== '') {
                   inThink = false;
-                }
+                } else {
+                  // Strip leading <think> from first chunk
+                  if (thinkText === '' && chunk.indexOf(thinkOpener) === 0) {
+                    chunk = chunk.substring(thinkOpener.length);
+                  }
+                  // Accumulate into sliding buffer for cross-chunk boundary detection
+                  thinkBuf += chunk;
+                  thinkText += chunk;
+                  chunk = '';
 
-                // Update live think block
-                if (thinkText) {
-                  ensureThinkBlock();
-                  var tc = document.getElementById('liveThinkContent');
-                  var tb = document.getElementById('liveThinkBadge');
-                  if (tc) tc.textContent = thinkText;
-                  if (tb) tb.textContent = thinkText.length + ' 字';
+                  // Search for think end in the buffer (last 200 chars to avoid O(n²))
+                  var searchStart = Math.max(0, thinkBuf.length - 200);
+                  var searchText = thinkBuf.substring(searchStart);
+                  var result = findThinkEnd(searchText);
+
+                  if (result) {
+                    // Found the boundary — rewind thinkText to before the tag
+                    var globalIdx = searchStart + result.idx;
+                    var beforeTag = thinkBuf.substring(0, globalIdx);
+                    var afterTag = thinkBuf.substring(globalIdx + result.len);
+                    thinkText = beforeTag;
+                    chunk = afterTag;
+                    thinkBuf = '';
+                    inThink = false;
+                  }
+
+                  // Update live think block
+                  if (thinkText) {
+                    ensureThinkBlock();
+                    var tc = document.getElementById('liveThinkContent');
+                    var tb = document.getElementById('liveThinkBadge');
+                    if (tc) tc.textContent = thinkText;
+                    if (tb) tb.textContent = thinkText.length + ' 字';
+                  }
                 }
               }
 
@@ -1372,27 +1400,6 @@ console.log('[DeepAnalyze] JS loaded');
                     var so = document.getElementById('streamOutput');
                     if (so) { so.innerHTML = renderMarkdown(fullText); }
                   }, 150);
-                }
-              }
-
-              // 中栏：节点工作内容（分布式模式按小节建卡片，总览流式追加）
-              if (currentMeta && currentMeta.mode === 'distributed') {
-                var mSec = chunk.match(/^### 工作表「(.+?)」分析（节点：(.+?)）$/m);
-                var mOv = chunk.match(/^## 总览与综合结论/m);
-                if (mSec) {
-                  midCurrent = midAddCard(mSec[1], mSec[2], chunk.replace(/^### 工作表「(.+?)」分析（节点：(.+?)）\n/m, ''));
-                  midRender();
-                } else if (mOv) {
-                  midCurrent = midAddCard('总览与综合结论', '主节点', chunk.replace(/^## 总览与综合结论（主节点生成）\n/m, ''));
-                  midRender();
-                } else if (midCurrent) {
-                  midCurrent.raw += chunk;
-                  if (!window._midTimer) {
-                    window._midTimer = setTimeout(function () {
-                      window._midTimer = null;
-                      midRender();
-                    }, 300);
-                  }
                 }
               }
 
