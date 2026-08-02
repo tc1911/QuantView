@@ -49,6 +49,9 @@ DEEPSEEK_MODEL = "deepseek-reasoner" if DEEPSEEK_THINKING else "deepseek-chat"
 _NODE_LIST = os.environ.get("DEEPANALYZE_NODES", "").strip()
 _NODE_TIMEOUT = float(os.environ.get("DEEPANALYZE_NODE_TIMEOUT", "600"))
 _SHEET_MAX_TOKENS = 8192  # 每个工作表任务的最大输出 token 数
+# Qwen3 等模型默认开启思考模式，思维链会泄漏进正文（"这是思考过程"式输出）；
+# 对本地 llama-server 一律禁用 thinking
+_NO_THINK_BODY = {"chat_template_kwargs": {"enable_thinking": False}}
 # 硬数字进入 prompt 的最大字符数（默认 12000，覆盖全部 11 张表约需 8500）
 # 太小会导致资金状况/经营预算等表被截断，模型误判"无数据"
 _HARD_NUMS_LIMIT = int(os.environ.get("DEEPANALYZE_HARD_NUMS_LIMIT", "12000"))
@@ -988,8 +991,8 @@ def _run_inference(prompt, max_tokens=16384, stream=False):
         if isinstance(model, str) and model.startswith("llama-server:"):
             # 外部 llama-server → 走 API 路径（max_tokens 对齐本地模型）
             if stream:
-                return _call_deepseek_api_stream(prompt, max_tokens=65536)
-            return _call_deepseek_api(prompt, max_tokens=65536)
+                return _call_deepseek_api_stream(prompt, max_tokens=65536, extra_body=_NO_THINK_BODY)
+            return _call_deepseek_api(prompt, max_tokens=65536, extra_body=_NO_THINK_BODY)
 
         # ── 内嵌 llama-cpp-python ──
         def _gguf_llama_stream():
@@ -999,7 +1002,7 @@ def _run_inference(prompt, max_tokens=16384, stream=False):
                     {"role": "user", "content": prompt},
                 ],
                 max_tokens=65536, temperature=0.7, top_p=0.9,
-                stream=True):
+                stream=True, chat_template_kwargs={"enable_thinking": False}):
                 delta = chunk["choices"][0].get("delta", {})
                 text = delta.get("content", "")
                 if text:
@@ -1012,7 +1015,8 @@ def _run_inference(prompt, max_tokens=16384, stream=False):
                     {"role": "system", "content": "直接输出分析报告，用 Markdown。"},
                     {"role": "user", "content": prompt},
                 ],
-                max_tokens=65536, temperature=0.7, top_p=0.9)
+                max_tokens=65536, temperature=0.7, top_p=0.9,
+                chat_template_kwargs={"enable_thinking": False})
             output = result["choices"][0]["message"]["content"].strip()
         except Exception as e:
             raise RuntimeError(f"GGUF 推理出错: {str(e)}")
