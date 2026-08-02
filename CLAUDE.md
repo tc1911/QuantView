@@ -33,6 +33,7 @@ Useful deps: `flask pandas matplotlib numpy` (required); `openpyxl` (required �
 | `DEEPANALYZE_NODE_TIMEOUT` | 单次节点调用超时秒数（默认 600） |
 | `DEEPANALYZE_HARD_NUMS_LIMIT` | 硬数字进入 prompt 的最大字符数（默认 12000；覆盖全表约需 8500，设小了资金状况/经营预算等表会被截断） |
 | `DEEPANALYZE_PORT` | 服务端口（默认 5000；同机跑主/加速双实例时用 `start_node.bat` 的 5001） |
+| `DEEPANALYZE_TEMPERATURE` | 采样温度（默认 0.5；报告为确定性任务，低温度降低单次跑飞/对话式输出概率） |
 
 ## Architecture
 

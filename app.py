@@ -60,6 +60,8 @@ _LOCAL_SERVER_BODY = {
 # 硬数字进入 prompt 的最大字符数（默认 12000，覆盖全部 11 张表约需 8500）
 # 太小会导致资金状况/经营预算等表被截断，模型误判"无数据"
 _HARD_NUMS_LIMIT = int(os.environ.get("DEEPANALYZE_HARD_NUMS_LIMIT", "12000"))
+# 采样温度（默认 0.5：报告是确定性任务，低温度降低单次跑飞/对话式输出概率）
+_TEMPERATURE = float(os.environ.get("DEEPANALYZE_TEMPERATURE", "0.5"))
 
 if DEBUG_MODE:
     print("=" * 60)
@@ -881,7 +883,7 @@ def _call_deepseek_api(prompt, max_tokens=16384, extra_body=None):
             {"role": "system", "content": "你是一位资深的企业经营数据分析师。请仔细分析数据并给出专业、详尽的报告。使用 Markdown 格式输出。"},
             {"role": "user", "content": prompt},
         ],
-        "temperature": 0.7,
+        "temperature": _TEMPERATURE,
         "max_tokens": max_tokens,
         "top_p": 0.9,
     }
@@ -938,7 +940,7 @@ def _call_deepseek_api_stream(prompt, max_tokens=16384, extra_body=None):
             {"role": "system", "content": "你是一位资深的企业经营数据分析师。请仔细分析数据并给出专业、详尽的报告。使用 Markdown 格式输出。"},
             {"role": "user", "content": prompt},
         ],
-        "temperature": 0.7,
+        "temperature": _TEMPERATURE,
         "max_tokens": max_tokens,
         "top_p": 0.9,
         "stream": True,
@@ -1028,7 +1030,7 @@ def _run_inference(prompt, max_tokens=16384, stream=False):
                     {"role": "system", "content": "你是财务分析师。逐表深度分析，每个表输出150字以上。引用预计算汇总中的具体数字。不要概括，要详细。"},
                     {"role": "user", "content": prompt},
                 ],
-                max_tokens=65536, temperature=0.7, top_p=0.9,
+                max_tokens=65536, temperature=_TEMPERATURE, top_p=0.9,
                 stream=True, chat_template_kwargs={"enable_thinking": False},
                 repeat_penalty=1.15, repeat_last_n=512):
                 delta = chunk["choices"][0].get("delta", {})
@@ -1043,7 +1045,7 @@ def _run_inference(prompt, max_tokens=16384, stream=False):
                     {"role": "system", "content": "直接输出分析报告，用 Markdown。"},
                     {"role": "user", "content": prompt},
                 ],
-                max_tokens=65536, temperature=0.7, top_p=0.9,
+                max_tokens=65536, temperature=_TEMPERATURE, top_p=0.9,
                 chat_template_kwargs={"enable_thinking": False},
                 repeat_penalty=1.15, repeat_last_n=512)
             output = result["choices"][0]["message"]["content"].strip()
@@ -1064,7 +1066,7 @@ def _run_inference(prompt, max_tokens=16384, stream=False):
             gen_kwargs = dict(
                 **inputs,
                 max_new_tokens=4096,
-                temperature=0.7,
+                temperature=_TEMPERATURE,
                 top_p=0.9,
                 do_sample=True,
                 pad_token_id=tokenizer.pad_token_id or tokenizer.eos_token_id,
@@ -1086,7 +1088,7 @@ def _run_inference(prompt, max_tokens=16384, stream=False):
         formatted_prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
         inputs = tokenizer(formatted_prompt, return_tensors="pt", truncation=True, max_length=8192).to(model.device)
         with torch.no_grad():
-            outputs = model.generate(**inputs, max_new_tokens=4096, temperature=0.7, top_p=0.9,
+            outputs = model.generate(**inputs, max_new_tokens=4096, temperature=_TEMPERATURE, top_p=0.9,
                                      do_sample=True, pad_token_id=tokenizer.pad_token_id or tokenizer.eos_token_id)
         gen_ids = outputs[0][inputs["input_ids"].shape[1]:]
         model_output = tokenizer.decode(gen_ids, skip_special_tokens=True)
@@ -1229,6 +1231,8 @@ def _prepare_analysis_input_impl(valid_files, question):
 11. "预算金额/合同金额/已付金额"是项目执行阶段而非时间序列，禁止计算降幅，应解读为执行进度。
 12. 必须分析数据中的每一个工作表，每个工作表一个板块，禁止省略任何一张；确实无法分析的表也要写一小节说明原因。
 13. 每个板块只输出 1 个【图表数据】区块，禁止重复或近似重复的图表。
+14. 本任务是单轮一次性任务，必须在一次输出中生成完整报告；禁止向用户提问、禁止"是否继续"式交互、禁止中途停止等待确认。
+15. 禁止使用 LaTeX 公式、$...$、引用块（> 符号）等格式，一律使用纯 Markdown 表格与文本。
 """)
     prompt_parts.append("")
     prompt_parts.append(f"=== 用户问题 ===\n{question}")
@@ -1450,7 +1454,9 @@ def _build_sheet_prompt(label, summary, hard, question):
         "13. '预算金额/合同金额/已付金额'是项目执行阶段而非时间序列，禁止计算降幅，应解读为执行进度。",
         "14. 图表数据必须与正文一致：只有当期数据的指标只列当期数值，禁止用0、重复值或其他指标行数值填充缺失期别。",
         "15. 每个板块只输出 1 个【图表数据】区块，禁止重复或近似重复的图表。",
-        "16. 分析正文之后输出【图表数据】区块，每个分析模块至少一张图表，数据必须来自硬数字，禁止编造，格式：",
+        "16. 本任务是单轮一次性任务，必须一次输出完整分析；禁止向用户提问、禁止'是否继续'式交互、禁止中途停止等待确认。",
+        "17. 禁止使用 LaTeX 公式、$...$、引用块（> 符号）等格式，一律使用纯 Markdown 表格与文本。",
+        "18. 分析正文之后输出【图表数据】区块，每个分析模块至少一张图表，数据必须来自硬数字，禁止编造，格式：",
         "```chartjson",
         '[{"title": "图表标题", "type": "bar/pie/line/bar_h", "data": {"指标1": 数值, "指标2": 数值}}]',
         "```",
