@@ -507,10 +507,10 @@ def extract_hard_numbers_core(stream):
                     is_tax_sheet = "税" in sname
                     if is_multiperiod and is_tax_sheet:
                         if val_pairs:
-                            lines.append(f"  {full_label}({val_pairs[0]}")
+                            lines.append(f"  {full_label}({val_pairs[0]})")
                     else:
                         for vp in val_pairs[:4]:
-                            lines.append(f"  {full_label}({vp}")
+                            lines.append(f"  {full_label}({vp})")
                 # 合计行优先保留，其余按序截断（每 sheet 最多 20 行）
                 if len(lines) > 25:
                     priority = [l for l in lines if "合计" in l or "总计" in l or "收益率" in l or "周转率" in l or "乘数" in l or "净利率" in l or "费用率" in l]

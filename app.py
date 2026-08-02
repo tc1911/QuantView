@@ -49,6 +49,9 @@ DEEPSEEK_MODEL = "deepseek-reasoner" if DEEPSEEK_THINKING else "deepseek-chat"
 _NODE_LIST = os.environ.get("DEEPANALYZE_NODES", "").strip()
 _NODE_TIMEOUT = float(os.environ.get("DEEPANALYZE_NODE_TIMEOUT", "600"))
 _SHEET_MAX_TOKENS = 8192  # 每个工作表任务的最大输出 token 数
+# 硬数字进入 prompt 的最大字符数（默认 12000，覆盖全部 11 张表约需 8500）
+# 太小会导致资金状况/经营预算等表被截断，模型误判"无数据"
+_HARD_NUMS_LIMIT = int(os.environ.get("DEEPANALYZE_HARD_NUMS_LIMIT", "12000"))
 
 if DEBUG_MODE:
     print("=" * 60)
@@ -1117,8 +1120,8 @@ def _prepare_analysis_input_impl(valid_files, question):
         hard_nums = extract_hard_numbers_from_bytes(file_buffers)
         if hard_nums:
             hard_nums_str = "\n".join(hard_nums)
-            if len(hard_nums_str) > 5000:
-                hard_nums_str = hard_nums_str[:5000].rsplit("\n", 1)[0] + "\n（已截断）"
+            if len(hard_nums_str) > _HARD_NUMS_LIMIT:
+                hard_nums_str = hard_nums_str[:_HARD_NUMS_LIMIT].rsplit("\n", 1)[0] + "\n（已截断）"
     except Exception:
         pass
 
@@ -1135,6 +1138,9 @@ def _prepare_analysis_input_impl(valid_files, question):
         prompt_parts.append("=== ❌硬数字-禁止编造-必须引用 ===\n"
                            "⚠️ 以下数值从Excel精确提取，绝对正确，必须原样引用，禁止修改。\n"
                            "⚠️ 每个标签标注了期别（如2026H1=当前报告期），请使用对应[当前报告期]的值。\n"
+                           "⚠️ 硬数字行的格式为「指标名(期别=数值)」，如「应收票据(期末=13600)」表示期末应收票据为13600万元。\n"
+                           "⚠️ 负号只可能出现在数值本身（如-100表示负值），括号内是期别标签，不是负数；"
+                           "同一指标通常有'期初'和'期末'两行，必须成对核对后再解读增减方向。\n"
                            "⚠️ 如同时出现'期初'和'期末'，请使用期末值（期末=当前报告期末的余额）。\n"
                            + hard_nums_str + "\n=== 结束 ===")
         prompt_parts.append("")
@@ -1328,6 +1334,9 @@ def _build_sheet_prompt(label, summary, hard, question):
             "=== ❌硬数字-禁止编造-必须引用 ===",
             "⚠️ 以下数值从Excel精确提取，绝对正确，必须原样引用，禁止修改。",
             "⚠️ 每个标签标注了期别（如2026H1=当前报告期），请使用对应[当前报告期]的值。",
+            "⚠️ 硬数字行的格式为「指标名(期别=数值)」，如「应收票据(期末=13600)」表示期末应收票据为13600万元。",
+            "⚠️ 负号只可能出现在数值本身（如-100表示负值），括号内是期别标签，不是负数；"
+            "同一指标通常有'期初'和'期末'两行，必须成对核对后再解读增减方向。",
             hard,
             "=== 结束 ===",
             "",

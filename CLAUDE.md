@@ -17,7 +17,7 @@ Startup behavior depends on mode (see Environment variables):
 - **Normal mode**: requires a model in `models/`. Lazy-loads torch/transformers at startup (first load takes 10–30s). Exits with an error if no model is found.
 - **Debug mode** (`DEEPANALYZE_DEBUG=true`): skips local models entirely and calls the DeepSeek API — this is the fastest way to develop/test without GPU or local model weights. Always sets `DEEPSEEK_API_KEY` in this mode.
 
-Useful deps: `flask pandas matplotlib numpy` (required); `pdfplumber` (PDF tables, optional); `python-docx` (Word export, optional); `torch transformers` (HF models, lazy-imported); `llama-cpp-python` (embedded GGUF, lazy-imported).
+Useful deps: `flask pandas matplotlib numpy` (required); `openpyxl` (required — pandas reads .xlsx with it), `xlrd` (.xls); `pdfplumber` (PDF tables, optional); `python-docx` (Word export, optional); `torch transformers` (HF models, lazy-imported); `llama-cpp-python` (embedded GGUF, lazy-imported).
 
 ## Environment variables
 
@@ -31,6 +31,7 @@ Useful deps: `flask pandas matplotlib numpy` (required); `pdfplumber` (PDF table
 | `LLAMA_SERVER_PATH` | Path to llama-server binary (default auto-search, incl. `C:/Users/tc191/llama-cpp/llama-server.exe`) |
 | `DEEPANALYZE_NODES` | `name=url,name=url` 加速节点列表 — 设置了即为**主节点（分布式）模式**，工作表任务轮流分发，主节点只生成总览；不设置则为单节点模式 |
 | `DEEPANALYZE_NODE_TIMEOUT` | 单次节点调用超时秒数（默认 600） |
+| `DEEPANALYZE_HARD_NUMS_LIMIT` | 硬数字进入 prompt 的最大字符数（默认 12000；覆盖全表约需 8500，设小了资金状况/经营预算等表会被截断） |
 
 ## Architecture
 
@@ -52,7 +53,7 @@ All file parsing lives in **`file_processing.py`** (no Flask dependency; pure pa
 
 1. `read_file` — Excel: all sheets merged into one DataFrame with a `_sheet` column; PDF: pdfplumber tables merged with `_pdf_page`/`_pdf_table` columns; CSV: plain read.
 2. `df_summary` — builds a text summary: column dtype/null/uniqueness overview, per-sheet head/tail samples, text-column value distributions with row ranges, per-sheet numeric stats, missing values. This summary (not raw data) is what the model sees.
-3. `extract_hard_numbers_core` (also in `file_processing.py`) — finance-specific: re-reads Excel bytes to extract 合计/总计-style rows as "hard numbers" with normalized period labels (`2026H1`, `2026Q3`, 期末/年初 etc., see `_norm_period`). When present, the prompt marks them as authoritative ("禁止修改，必须原样引用") and **omits raw head/tail samples** so the model can't invent figures. This is an anti-hallucination mechanism — preserve it when editing prompt logic.
+3. `extract_hard_numbers_core` (also in `file_processing.py`) — finance-specific: re-reads Excel bytes to extract 合计/总计-style rows as "hard numbers" with normalized period labels (`2026H1`, `2026Q3`, 期末/年初 etc., see `_norm_period`). Line format is `指标名(期别=数值)` — the closing paren and the "负号只在数值本身、括号内是期别" warning in the prompt are deliberate anti-misreading protections; keep them when editing prompt logic. When present, the prompt marks hard numbers as authoritative ("禁止修改，必须原样引用") and **omits raw head/tail samples** so the model can't invent figures. This is an anti-hallucination mechanism — preserve it when editing prompt logic.
 4. `_prepare_analysis_input_impl` (in `app.py`) — assembles the giant Chinese system prompt: hard numbers first, then per-file summaries, then the user question, then a strict analysis protocol (per-section deep-dive, requirement checklist table, "no vague numbers" rules) and a requirement for a `chartjson` block at the end. File buffers are re-read from saved bytes because `FileStorage` streams are single-use.
 
 ### Distributed multi-node mode (master + accelerator nodes)
