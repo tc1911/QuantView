@@ -23,6 +23,8 @@ import matplotlib.font_manager as fm
 import numpy as np
 import urllib.request
 import urllib.error
+import time
+import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from file_processing import (
@@ -62,6 +64,8 @@ _LOCAL_SERVER_BODY = {
 _HARD_NUMS_LIMIT = int(os.environ.get("DEEPANALYZE_HARD_NUMS_LIMIT", "12000"))
 # 采样温度（默认 0.5：报告是确定性任务，低温度降低单次跑飞/对话式输出概率）
 _TEMPERATURE = float(os.environ.get("DEEPANALYZE_TEMPERATURE", "0.5"))
+# 无头模式（加速节点专用）：不提供 Web 界面，只保留 /analyze/sheet 任务接口与命令行日志
+_HEADLESS = os.environ.get("DEEPANALYZE_HEADLESS", "").lower() in ("1", "true", "yes")
 
 if DEBUG_MODE:
     print("=" * 60)
@@ -526,7 +530,13 @@ if not DEBUG_MODE:
 
 @app.route("/")
 def index():
-    """前端入口页面"""
+    """前端入口页面（无头模式不提供 Web 界面，仅提示）"""
+    if _HEADLESS:
+        return Response(
+            "加速节点模式：无 Web 界面。\n本实例仅提供 /analyze/sheet 任务接口，请由主节点调用。",
+            mimetype="text/plain; charset=utf-8",
+            status=404,
+        )
     resp = app.send_static_file("index.html")
     resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
     resp.headers["Pragma"] = "no-cache"
@@ -1760,11 +1770,17 @@ def analyze_sheet():
         max_tokens = int(data.get("max_tokens", _SHEET_MAX_TOKENS))
     except (TypeError, ValueError):
         max_tokens = _SHEET_MAX_TOKENS
+    # 控制台日志：任务标签（工作表名）、开始/完成时间与耗时
+    m = re.search(r"工作表「([^」]+)」", prompt[:300])
+    label = m.group(1) if m else "未命名任务"
+    print(f"[节点任务] 收到: {label} ({len(prompt)} 字符) @ {time.strftime('%H:%M:%S')}")
+    t0 = time.time()
     try:
         result = _run_inference(prompt, max_tokens=max_tokens)
+        print(f"[节点任务] 完成: {label} 耗时 {time.time()-t0:.1f}s 输出 {len(result)} 字符")
         return jsonify({"result": result})
     except Exception as e:
-        print(f"[节点任务错误] {e}")
+        print(f"[节点任务] 失败: {label} 耗时 {time.time()-t0:.1f}s 错误: {e}")
         return jsonify({"error": str(e)}), 500
 
 
@@ -1986,13 +2002,17 @@ if __name__ == "__main__":
     print("=" * 60)
     print()
     _port = int(os.environ.get("DEEPANALYZE_PORT", "5000"))
-    if _NODE_LIST:
+    if _HEADLESS:
+        print(f" 运行模式: 加速节点（无头，无 Web 界面）")
+        print(f" 任务接口: POST http://localhost:{_port}/analyze/sheet")
+    elif _NODE_LIST:
         print(f" 运行模式: 分布式主节点（加速节点: {_NODE_LIST}）")
         print(" 前端页面: http://localhost:%d（加速节点页面对应端口单独访问）" % _port)
     else:
         print(f" 运行模式: 单节点")
         print(" 前端页面: http://localhost:%d/" % _port)
-    print(f" 分析接口: POST http://localhost:{_port}/analyze")
+    if not _HEADLESS:
+        print(f" 分析接口: POST http://localhost:{_port}/analyze")
     print()
     print("按 Ctrl+C 停止服务")
     print("=" * 60)
