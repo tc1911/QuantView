@@ -487,6 +487,10 @@ def extract_hard_numbers_core(stream):
                             except (ValueError, TypeError):
                                 pass
                     if not val_pairs:
+                        # 无数值的标签行视为段落标题（如"净利润变动""销售类型"），
+                        # 同时更新 section_context——否则上下文会卡在上一个跳过标记
+                        # （如"单位：万元"），导致后续所有合计行共用错误前缀、无法区分
+                        section_context = label
                         last_section = label
                         continue
                     seen.add(dedup_key)
