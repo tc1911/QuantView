@@ -1667,33 +1667,41 @@ def _stream_section_worker(q, node, t):
                         first = False
                     q.put(("chunk", t, node, ("text", chunk)))
         else:
-            # 加速节点任务：SSE 流式读取
-            body = json.dumps({"prompt": t["prompt"], "max_tokens": _SHEET_MAX_TOKENS}).encode("utf-8")
-            req = urllib.request.Request(
-                node["url"] + "/analyze/sheet/stream",
-                data=body,
-                headers={"Content-Type": "application/json"},
-                method="POST",
-            )
-            with urllib.request.urlopen(req, timeout=_NODE_TIMEOUT) as resp:
-                for line in resp:
-                    line = line.decode("utf-8").strip()
-                    if not line.startswith("data: "):
-                        continue
-                    try:
-                        data = json.loads(line[6:])
-                    except json.JSONDecodeError:
-                        continue
-                    if data.get("type") == "text":
-                        chunk = data.get("content", "")
-                        if first:
-                            chunk = f"\n\n### 工作表「{t['label']}」分析（节点：{node['name']}）\n\n" + chunk
-                            first = False
-                        q.put(("chunk", t, node, ("text", chunk)))
-                    elif data.get("type") == "think":
-                        q.put(("chunk", t, node, ("think", data.get("content", ""))))
-                    elif data.get("type") == "error":
-                        raise RuntimeError(data.get("content", "节点流式任务错误"))
+            # 加速节点任务：SSE 流式读取（旧版节点无流式端点时回退非流式）
+            try:
+                body = json.dumps({"prompt": t["prompt"], "max_tokens": _SHEET_MAX_TOKENS}).encode("utf-8")
+                req = urllib.request.Request(
+                    node["url"] + "/analyze/sheet/stream",
+                    data=body,
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with urllib.request.urlopen(req, timeout=_NODE_TIMEOUT) as resp:
+                    for line in resp:
+                        line = line.decode("utf-8").strip()
+                        if not line.startswith("data: "):
+                            continue
+                        try:
+                            data = json.loads(line[6:])
+                        except json.JSONDecodeError:
+                            continue
+                        if data.get("type") == "text":
+                            chunk = data.get("content", "")
+                            if first:
+                                chunk = f"\n\n### 工作表「{t['label']}」分析（节点：{node['name']}）\n\n" + chunk
+                                first = False
+                            q.put(("chunk", t, node, ("text", chunk)))
+                        elif data.get("type") == "think":
+                            q.put(("chunk", t, node, ("think", data.get("content", ""))))
+                        elif data.get("type") == "error":
+                            raise RuntimeError(data.get("content", "节点流式任务错误"))
+            except urllib.error.HTTPError as e:
+                if e.code not in (404, 405):
+                    raise
+                # 加速节点是旧版本（无 /analyze/sheet/stream 端点）→ 回退非流式调用
+                print(f"[分布式] 节点 {node['url']} 无流式端点，回退非流式")
+                result = _call_node_sheet(node["url"], t["prompt"])
+                q.put(("chunk", t, node, ("text", f"\n\n### 工作表「{t['label']}」分析（节点：{node['name']}）\n\n{result}\n")))
         if first:
             # 节点没有产出任何文本（空输出）
             q.put(("chunk", t, node, ("text", f"\n\n### 工作表「{t['label']}」分析（节点：{node['name']}）\n\n（节点未返回有效分析内容）\n")))
