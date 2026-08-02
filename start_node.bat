@@ -1,4 +1,5 @@
 @echo off
+chcp 65001 >nul
 title QuantView - 加速节点
 cd /d "%~dp0"
 

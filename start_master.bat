@@ -1,4 +1,5 @@
 @echo off
+chcp 65001 >nul
 title QuantView - 主节点（分布式）
 cd /d "%~dp0"
 
