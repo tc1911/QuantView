@@ -1,0 +1,1721 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DeepAnalyze - 本地数据分析助手</title>
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<meta http-equiv="Pragma" content="no-cache">
+<meta http-equiv="Expires" content="0">
+<style>
+  :root {
+    --primary: #1a56db;
+    --primary-hover: #1e40af;
+    --primary-light: #e8f0fe;
+    --bg: #f5f7fa;
+    --card-bg: #ffffff;
+    --border: #e2e8f0;
+    --text: #1e293b;
+    --text-secondary: #64748b;
+    --text-muted: #94a3b8;
+    --success: #16a34a;
+    --error: #dc2626;
+    --warning: #d97706;
+    --radius: 8px;
+    --shadow: 0 1px 3px rgba(0,0,0,0.06), 0 1px 2px rgba(0,0,0,0.04);
+    --shadow-md: 0 4px 12px rgba(0,0,0,0.08);
+    --font-mono: 'Cascadia Code', 'Fira Code', 'JetBrains Mono', 'Consolas', 'Courier New', monospace;
+    --upload-bg: #fafbfc;
+    --upload-has-file-bg: #f0fdf4;
+    --file-item-bg: #f8fafc;
+    --result-bg: #fafbfc;
+    --input-bg: #ffffff;
+    --btn-secondary-bg: #ffffff;
+    --focus-ring: rgba(26,86,219,0.1);
+  }
+
+  [data-theme="dark"] {
+    --primary: #3b82f6;
+    --primary-hover: #2563eb;
+    --primary-light: #1e3a5f;
+    --bg: #0f172a;
+    --card-bg: #1e293b;
+    --border: #334155;
+    --text: #e2e8f0;
+    --text-secondary: #94a3b8;
+    --text-muted: #64748b;
+    --success: #22c55e;
+    --error: #ef4444;
+    --shadow: 0 1px 3px rgba(0,0,0,0.3);
+    --shadow-md: 0 4px 12px rgba(0,0,0,0.4);
+    --upload-bg: #1e293b;
+    --upload-has-file-bg: #0f2a1e;
+    --file-item-bg: #1e293b;
+    --result-bg: #1e293b;
+    --input-bg: #1e293b;
+    --btn-secondary-bg: #1e293b;
+    --focus-ring: rgba(59,130,246,0.2);
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+    line-height: 1.6;
+    transition: background 0.3s, color 0.3s;
+  }
+
+  /* ── Header ── */
+  .header {
+    background: var(--card-bg);
+    border-bottom: 1px solid var(--border);
+    padding: 0 32px;
+    height: 56px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    box-shadow: var(--shadow);
+    position: sticky;
+    top: 0;
+    z-index: 100;
+  }
+  .header-brand {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 18px;
+    font-weight: 700;
+    color: var(--primary);
+    letter-spacing: -0.3px;
+  }
+  .header-brand svg { width: 28px; height: 28px; flex-shrink: 0; }
+  .header-badge {
+    font-size: 11px;
+    font-weight: 500;
+    background: var(--primary-light);
+    color: var(--primary);
+    padding: 3px 10px;
+    border-radius: 99px;
+    letter-spacing: 0.3px;
+  }
+  .theme-toggle {
+    background: none;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 5px 7px;
+    cursor: pointer;
+    color: var(--text-secondary);
+    transition: all 0.15s;
+    display: flex;
+    align-items: center;
+    line-height: 0;
+  }
+  .theme-toggle:hover { color: var(--primary); border-color: var(--primary); }
+  .theme-toggle .icon-moon { display: none; }
+  .theme-toggle .icon-sun { display: block; }
+  [data-theme="dark"] .theme-toggle .icon-sun { display: none; }
+  [data-theme="dark"] .theme-toggle .icon-moon { display: block; }
+
+  /* ── Security Banner ── */
+  .security-banner {
+    background: linear-gradient(135deg, #eff6ff 0%, #f0fdf4 100%);
+    border: 1px solid #bfdbfe;
+    border-radius: var(--radius);
+    margin: 24px 32px 0;
+    padding: 12px 20px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 13px;
+    color: #1e40af;
+  }
+  .security-banner svg { flex-shrink: 0; }
+
+  /* ── Main Layout ── */
+  .main-container {
+    max-width: 960px;
+    margin: 0 auto;
+    padding: 24px 32px 48px;
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+  }
+
+  /* ── Card ── */
+  .card {
+    background: var(--card-bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow);
+    padding: 24px;
+  }
+  .card-title {
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--text);
+    margin-bottom: 16px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .card-title .step {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 22px;
+    height: 22px;
+    border-radius: 50%;
+    background: var(--primary);
+    color: #fff;
+    font-size: 12px;
+    font-weight: 600;
+    flex-shrink: 0;
+  }
+
+  /* ── Upload Zone ── */
+  .upload-zone {
+    border: 2px dashed var(--border);
+    border-radius: var(--radius);
+    padding: 40px 20px;
+    text-align: center;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    background: var(--upload-bg);
+  }
+  .upload-zone:hover,
+  .upload-zone.drag-over {
+    border-color: var(--primary);
+    background: var(--primary-light);
+  }
+  .upload-zone.has-file {
+    border-style: solid;
+    border-color: var(--success);
+    background: var(--upload-has-file-bg);
+  }
+  .upload-icon {
+    color: var(--text-muted);
+    margin-bottom: 10px;
+  }
+  .upload-zone:hover .upload-icon,
+  .upload-zone.drag-over .upload-icon {
+    color: var(--primary);
+  }
+  .upload-text {
+    font-size: 14px;
+    color: var(--text-secondary);
+  }
+  .upload-text strong {
+    color: var(--primary);
+    font-weight: 600;
+  }
+  .upload-hint {
+    font-size: 12px;
+    color: var(--text-muted);
+    margin-top: 6px;
+  }
+  .file-info {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    margin-top: 12px;
+    font-size: 14px;
+    font-weight: 500;
+    color: var(--text);
+  }
+  .file-info .remove-file {
+    cursor: pointer;
+    color: var(--text-muted);
+    font-size: 18px;
+    line-height: 1;
+    transition: color 0.15s;
+    margin-left: 4px;
+  }
+  .file-info .remove-file:hover { color: var(--error); }
+  #fileInput { display: none; }
+  .file-list { margin-top: 12px; }
+  .file-list-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 8px 12px;
+    background: var(--file-item-bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    font-size: 13px;
+    margin-bottom: 6px;
+  }
+  .file-list-item .file-item-name { font-weight: 500; color: var(--text); flex: 1; }
+  .file-list-item .file-item-size { color: var(--text-muted); margin: 0 12px; white-space: nowrap; }
+  .file-list-item .file-item-badge {
+    font-size: 11px;
+    background: var(--primary-light);
+    color: var(--primary);
+    padding: 1px 8px;
+    border-radius: 99px;
+    margin-right: 8px;
+    white-space: nowrap;
+  }
+  .file-list-item .file-item-remove {
+    cursor: pointer;
+    color: var(--text-muted);
+    font-size: 16px;
+    line-height: 1;
+    transition: color 0.15s;
+    flex-shrink: 0;
+  }
+  .file-list-item .file-item-remove:hover { color: var(--error); }
+  .file-list-summary {
+    font-size: 12px;
+    color: var(--text-muted);
+    margin-top: 10px;
+    text-align: center;
+  }
+
+  /* ── Question Input ── */
+  .question-input {
+    width: 100%;
+    min-height: 90px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 12px 14px;
+    font-size: 14px;
+    font-family: inherit;
+    color: var(--text);
+    background: var(--input-bg);
+    resize: vertical;
+    transition: border-color 0.2s;
+    line-height: 1.7;
+  }
+  .question-input:focus {
+    outline: none;
+    border-color: var(--primary);
+    box-shadow: 0 0 0 3px var(--focus-ring);
+  }
+  .question-input::placeholder { color: var(--text-muted); }
+
+  /* ── Submit Button ── */
+  .btn-submit {
+    width: 100%;
+    padding: 13px 24px;
+    font-size: 15px;
+    font-weight: 600;
+    color: #fff;
+    background: var(--primary);
+    border: none;
+    border-radius: var(--radius);
+    cursor: pointer;
+    transition: background 0.2s, transform 0.1s, box-shadow 0.2s;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    letter-spacing: 0.3px;
+  }
+  .btn-submit:hover { background: var(--primary-hover); box-shadow: var(--shadow-md); }
+  .btn-submit:active { transform: translateY(1px); }
+  .btn-submit:disabled {
+    background: var(--text-muted);
+    cursor: not-allowed;
+    box-shadow: none;
+    transform: none;
+  }
+  .btn-submit.btn-stop {
+    background: var(--error);
+  }
+  .btn-submit.btn-stop:hover {
+    background: #b91c1c;
+  }
+
+  /* ── Loading ── */
+  .loading-container {
+    display: none;
+    text-align: center;
+    padding: 32px 20px;
+  }
+  .loading-container.active { display: block; }
+
+  .spinner {
+    display: inline-block;
+    width: 40px;
+    height: 40px;
+    border: 3px solid var(--border);
+    border-top-color: var(--primary);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+    margin-bottom: 16px;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  .loading-text {
+    font-size: 15px;
+    font-weight: 500;
+    color: var(--text);
+    margin-bottom: 6px;
+  }
+  .loading-hint {
+    font-size: 13px;
+    color: var(--text-secondary);
+  }
+  .loading-progress {
+    width: 100%;
+    max-width: 300px;
+    height: 3px;
+    background: var(--border);
+    border-radius: 99px;
+    margin: 16px auto 0;
+    overflow: hidden;
+  }
+  .loading-progress-bar {
+    height: 100%;
+    background: var(--primary);
+    border-radius: 99px;
+    width: 10%;
+    animation: progress-indeterminate 2s ease-in-out infinite;
+  }
+  @keyframes progress-indeterminate {
+    0% { width: 10%; margin-left: 0; }
+    50% { width: 60%; margin-left: 20%; }
+    100% { width: 10%; margin-left: 90%; }
+  }
+
+  /* ── Result ── */
+  .result-section { display: none; }
+  .result-section.active { display: block; }
+
+  .result-content {
+    background: var(--result-bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 20px 24px;
+    font-family: var(--font-mono);
+    font-size: 14px;
+    line-height: 1.85;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+    color: var(--text);
+    max-height: 600px;
+    overflow-y: auto;
+  }
+  .result-content::-webkit-scrollbar { width: 6px; }
+  .result-content::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 3px; }
+
+  /* ── Think block (collapsible) ── */
+  .think-block {
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    margin-bottom: 16px;
+    overflow: hidden;
+    background: var(--bg);
+  }
+  .think-toggle {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    padding: 10px 14px;
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--text-secondary);
+    background: none;
+    border: none;
+    cursor: pointer;
+    text-align: left;
+    transition: background 0.15s;
+  }
+  .think-toggle:hover { background: var(--primary-light); }
+  .think-toggle .arrow {
+    transition: transform 0.2s;
+    font-size: 10px;
+    flex-shrink: 0;
+  }
+  .think-block.open .think-toggle .arrow { transform: rotate(90deg); }
+  .think-content {
+    display: none;
+    padding: 0 14px 14px;
+    font-family: var(--font-mono);
+    font-size: 13px;
+    line-height: 1.7;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+    color: var(--text-muted);
+    max-height: 400px;
+    overflow-y: auto;
+    border-top: 1px solid var(--border);
+    padding-top: 12px;
+    margin: 0 14px;
+  }
+  .think-block.open .think-content { display: block; }
+  .think-badge {
+    font-size: 11px;
+    background: var(--primary-light);
+    color: var(--primary);
+    padding: 1px 8px;
+    border-radius: 99px;
+    margin-left: auto;
+    white-space: nowrap;
+  }
+  .output-block {
+    font-family: var(--font-mono);
+    font-size: 14px;
+    line-height: 1.85;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+    color: var(--text);
+  }
+  .output-label {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-secondary);
+    margin-bottom: 8px;
+    padding-bottom: 6px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  /* ── Markdown output styles ── */
+  .output-block h1 { font-size: 1.5em; margin: 0.8em 0 0.4em; font-weight: 700; color: var(--text); }
+  .output-block h2 { font-size: 1.3em; margin: 0.7em 0 0.3em; font-weight: 700; color: var(--text); }
+  .output-block h3 { font-size: 1.15em; margin: 0.6em 0 0.25em; font-weight: 600; color: var(--text); }
+  .output-block h4 { font-size: 1.05em; margin: 0.5em 0 0.2em; font-weight: 600; color: var(--text); }
+  .output-block p { margin: 0.5em 0; }
+  .output-block ul, .output-block ol { margin: 0.5em 0; padding-left: 1.8em; }
+  .output-block li { margin: 0.2em 0; }
+  .output-block strong { font-weight: 700; color: var(--text); }
+  .output-block em { font-style: italic; }
+  .output-block code {
+    background: var(--primary-light);
+    color: var(--primary-hover);
+    padding: 1px 6px;
+    border-radius: 4px;
+    font-family: var(--font-mono);
+    font-size: 0.9em;
+  }
+  .output-block pre {
+    background: #1e293b;
+    color: #e2e8f0;
+    padding: 14px 18px;
+    border-radius: var(--radius);
+    overflow-x: auto;
+    font-family: var(--font-mono);
+    font-size: 0.88em;
+    line-height: 1.6;
+    margin: 0.8em 0;
+  }
+  .output-block pre code {
+    background: none;
+    color: inherit;
+    padding: 0;
+    font-size: inherit;
+  }
+  .output-block table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 0.8em 0;
+    font-size: 0.95em;
+  }
+  .output-block th {
+    background: var(--bg);
+    font-weight: 600;
+    text-align: left;
+    padding: 8px 12px;
+    border: 1px solid var(--border);
+  }
+  .output-block td {
+    padding: 7px 12px;
+    border: 1px solid var(--border);
+  }
+  .output-block tr:nth-child(even) td { background: rgba(0,0,0,0.02); }
+  [data-theme="dark"] .output-block tr:nth-child(even) td { background: rgba(255,255,255,0.03); }
+  .output-block hr { border: none; border-top: 1px solid var(--border); margin: 1em 0; }
+  .output-block a { color: var(--primary); text-decoration: underline; }
+  .output-block blockquote {
+    border-left: 3px solid var(--primary);
+    padding: 4px 14px;
+    margin: 0.8em 0;
+    color: var(--text-secondary);
+    background: var(--bg);
+    border-radius: 0 var(--radius) var(--radius) 0;
+  }
+
+  .charts-container { margin-top: 20px; }
+  .chart-item {
+    margin-bottom: 20px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    overflow: hidden;
+    background: var(--card-bg);
+  }
+  .chart-item-header {
+    padding: 10px 16px;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-secondary);
+    background: var(--bg);
+    border-bottom: 1px solid var(--border);
+  }
+  .chart-item img {
+    width: 100%;
+    display: block;
+    padding: 8px;
+    box-sizing: border-box;
+  }
+
+  .result-actions {
+    display: flex;
+    gap: 10px;
+    margin-top: 16px;
+  }
+  .btn-secondary {
+    padding: 8px 18px;
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--text-secondary);
+    background: var(--btn-secondary-bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    cursor: pointer;
+    transition: all 0.15s;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .btn-secondary:hover {
+    color: var(--primary);
+    border-color: var(--primary);
+  }
+
+  /* ── Error / Alert ── */
+  .alert {
+    padding: 12px 16px;
+    border-radius: var(--radius);
+    font-size: 14px;
+    font-weight: 500;
+    display: none;
+  }
+  .alert.active { display: block; }
+  .alert-error {
+    background: #fef2f2;
+    border: 1px solid #fecaca;
+    color: #991b1b;
+  }
+  .alert-success {
+    background: #f0fdf4;
+    border: 1px solid #bbf7d0;
+    color: #166534;
+  }
+
+  /* ── Footer ── */
+  .footer {
+    text-align: center;
+    padding: 24px 32px;
+    font-size: 12px;
+    color: var(--text-muted);
+  }
+
+  /* ── History Sidebar ── */
+  .history-sidebar {
+    position: fixed;
+    left: 0; top: 56px; bottom: 0;
+    width: 260px;
+    background: var(--card-bg);
+    border-right: 1px solid var(--border);
+    overflow-y: auto;
+    z-index: 90;
+    transform: translateX(-100%);
+    transition: transform 0.25s ease;
+    display: flex; flex-direction: column;
+  }
+  .history-sidebar.open { transform: translateX(0); }
+  .history-toggle {
+    position: fixed; left: 0; top: 100px;
+    background: var(--card-bg);
+    border: 1px solid var(--border);
+    border-left: none;
+    border-radius: 0 var(--radius) var(--radius) 0;
+    padding: 10px 6px;
+    cursor: pointer;
+    z-index: 91;
+    color: var(--text-secondary);
+    font-size: 12px;
+    writing-mode: vertical-rl;
+    letter-spacing: 2px;
+    transition: left 0.25s ease;
+  }
+  .history-sidebar.open ~ .history-toggle,
+  .history-sidebar.open + .history-toggle { left: 260px; }
+  .history-header {
+    padding: 14px 16px;
+    font-size: 14px; font-weight: 600;
+    color: var(--text);
+    border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; justify-content: space-between;
+    flex-shrink: 0;
+  }
+  .history-clear {
+    font-size: 11px; color: var(--text-muted); cursor: pointer;
+    background: none; border: none;
+  }
+  .history-clear:hover { color: var(--error); }
+  .history-list { flex: 1; overflow-y: auto; padding: 8px; }
+  .history-item {
+    padding: 10px 12px;
+    border-radius: 6px;
+    cursor: pointer;
+    margin-bottom: 6px;
+    border: 1px solid transparent;
+    transition: all 0.15s;
+    font-size: 12px;
+  }
+  .history-item:hover { background: var(--bg); border-color: var(--border); }
+  .history-item.selected { border-color: var(--primary); background: var(--primary-light); }
+  .history-item-title {
+    font-weight: 600; color: var(--text);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .history-item-meta {
+    font-size: 11px; color: var(--text-muted); margin-top: 2px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+
+  /* ── Dark Mode overrides ── */
+  [data-theme="dark"] .security-banner {
+    background: linear-gradient(135deg, #1e3a5f 0%, #0f2a1e 100%);
+    border-color: #1e3a5f;
+    color: #93c5fd;
+  }
+  [data-theme="dark"] .alert-error {
+    background: #2d1215;
+    border-color: #7f1d1d;
+    color: #fca5a5;
+  }
+  [data-theme="dark"] .alert-success {
+    background: #0f2a1e;
+    border-color: #166534;
+    color: #86efac;
+  }
+  [data-theme="dark"] .result-content::-webkit-scrollbar-thumb {
+    background: #475569;
+  }
+  /* ── Responsive ── */
+  @media (max-width: 640px) {
+    .header { padding: 0 16px; }
+    .main-container { padding: 16px; }
+    .security-banner { margin: 16px 16px 0; }
+    .card { padding: 16px; }
+    .upload-zone { padding: 24px 16px; }
+  }
+</style>
+</head>
+<body>
+
+<!-- Header -->
+<header class="header">
+  <div class="header-brand">
+    <svg viewBox="0 0 32 32" fill="none"><rect x="2" y="2" width="12" height="12" rx="2" fill="#1a56db"/><rect x="18" y="2" width="12" height="12" rx="2" fill="#60a5fa"/><rect x="2" y="18" width="12" height="12" rx="2" fill="#60a5fa"/><rect x="18" y="18" width="12" height="12" rx="2" fill="#1a56db"/><rect x="14" y="14" width="4" height="4" rx="1" fill="#fff" opacity="0.8"/></svg>
+    DeepAnalyze
+  </div>
+  <div style="display:flex;align-items:center;gap:12px">
+    <button class="theme-toggle" id="themeToggle" title="切换深色模式">
+      <svg class="icon-sun" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
+      <svg class="icon-moon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.79A9 9 0 1111.21 3 7 7 0 0021 12.79z"/></svg>
+    </button>
+    <span class="header-badge">本地分析 · 数据安全</span>
+  </div>
+</header>
+
+<!-- History Sidebar -->
+<div class="history-sidebar" id="historySidebar">
+  <div class="history-header">
+    历史记录
+    <button class="history-clear" id="historyClear" title="清空历史">清空</button>
+  </div>
+  <div class="history-list" id="historyList"></div>
+</div>
+<button class="history-toggle" id="historyToggle">历史记录</button>
+
+<!-- Security Banner -->
+<div class="security-banner">
+  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="M9 12l2 2 4-4"/></svg>
+  数据完全在本地处理，不上传任何云端，您的数据始终安全可控
+</div>
+
+<!-- Main -->
+<main class="main-container">
+
+  <!-- Step 1: Upload -->
+  <div class="card" id="uploadCard">
+    <div class="card-title"><span class="step">1</span> 上传数据文件</div>
+    <div class="upload-zone" id="uploadZone">
+      <div class="upload-icon">
+        <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+      </div>
+      <div class="upload-text">拖拽文件到此处，或<strong>点击选择文件</strong></div>
+      <div class="upload-hint">支持 .xlsx / .xls / .csv / .pdf 格式，可上传多个文件</div>
+    </div>
+    <div class="file-list" id="fileList"></div>
+    <input type="file" id="fileInput" accept=".xlsx,.xls,.csv,.pdf" multiple>
+  </div>
+
+  <!-- Step 2: Question -->
+  <div class="card">
+    <div class="card-title"><span class="step">2</span> 输入分析需求</div>
+    <textarea class="question-input" id="questionInput"
+      placeholder="请描述您想要分析的内容...">请全面分析经营数据，给出关键洞察和建议</textarea>
+  </div>
+
+  <!-- Submit -->
+  <button class="btn-submit" id="submitBtn">
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+    开始分析
+  </button>
+
+  <!-- Loading -->
+  <div class="loading-container" id="loadingContainer">
+    <div class="spinner"></div>
+    <div class="loading-text">分析中，模型加载可能需要 10-30 秒…</div>
+    <div class="loading-hint">正在调用本地 AI 模型进行深度分析，请耐心等待</div>
+    <div class="loading-progress">
+      <div class="loading-progress-bar"></div>
+    </div>
+  </div>
+
+  <!-- Error -->
+  <div class="alert alert-error" id="errorAlert"></div>
+
+  <!-- Result -->
+  <div class="result-section card" id="resultSection">
+    <div class="card-title">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M9 12l2 2 4-4"/></svg>
+      分析报告
+    </div>
+    <div class="result-content" id="resultContent"></div>
+    <div class="charts-container" id="chartsContainer"></div>
+    <div class="result-actions">
+      <button class="btn-secondary" id="copyBtn">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
+        复制报告
+      </button>
+      <button class="btn-secondary" id="downloadBtn">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+        下载 MD
+      </button>
+      <button class="btn-secondary" id="downloadWordBtn">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="2" width="20" height="20" rx="2"/><line x1="6" y1="7" x2="18" y2="7"/><line x1="6" y1="11" x2="18" y2="11"/><line x1="10" y1="15" x2="18" y2="15"/></svg>
+        下载 Word
+      </button>
+      <button class="btn-secondary" id="newAnalysisBtn">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="16"/><line x1="8" y1="12" x2="16" y2="12"/></svg>
+        新建分析
+      </button>
+    </div>
+  </div>
+
+</main>
+
+<footer class="footer">
+  DeepAnalyze &mdash; 本地数据分析助手 &mdash; 所有数据处理均在本地完成
+</footer>
+
+<script>
+console.log('[DeepAnalyze] JS loaded');
+(function () {
+  console.log('[DeepAnalyze] IIFE running');
+  // ── Dark Mode ──
+  var STORAGE_KEY = 'deepanalyze-theme';
+  var html = document.documentElement;
+
+  function getPreferredTheme() {
+    var stored = localStorage.getItem(STORAGE_KEY);
+    if (stored) return stored;
+    return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+  }
+
+  function applyTheme(theme) {
+    if (theme === 'dark') {
+      html.setAttribute('data-theme', 'dark');
+    } else {
+      html.removeAttribute('data-theme');
+    }
+  }
+
+  function toggleTheme() {
+    var current = html.getAttribute('data-theme') === 'dark' ? 'dark' : 'light';
+    var next = current === 'dark' ? 'light' : 'dark';
+    applyTheme(next);
+    localStorage.setItem(STORAGE_KEY, next);
+  }
+
+  // Init on load
+  applyTheme(getPreferredTheme());
+
+  // ── DOM refs ──
+  const themeToggle = document.getElementById('themeToggle');
+  const uploadZone = document.getElementById('uploadZone');
+  const fileInput = document.getElementById('fileInput');
+  const fileList = document.getElementById('fileList');
+  const questionInput = document.getElementById('questionInput');
+  const submitBtn = document.getElementById('submitBtn');
+  const loadingContainer = document.getElementById('loadingContainer');
+  const errorAlert = document.getElementById('errorAlert');
+  const resultSection = document.getElementById('resultSection');
+  const resultContent = document.getElementById('resultContent');
+  const chartsContainer = document.getElementById('chartsContainer');
+  const copyBtn = document.getElementById('copyBtn');
+  const downloadBtn = document.getElementById('downloadBtn');
+  const newAnalysisBtn = document.getElementById('newAnalysisBtn');
+  const historySidebar = document.getElementById('historySidebar');
+  const historyToggle = document.getElementById('historyToggle');
+  const historyList = document.getElementById('historyList');
+  const historyClear = document.getElementById('historyClear');
+
+  let selectedFiles = [];
+
+  // ── Helpers ──
+  function formatFileSize(bytes) {
+    if (!bytes) return '';
+    if (bytes < 1024) return bytes + ' B';
+    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+    return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+  }
+
+  function showError(msg) {
+    errorAlert.textContent = msg;
+    errorAlert.classList.add('active');
+  }
+
+  function hideError() {
+    errorAlert.classList.remove('active');
+    errorAlert.textContent = '';
+  }
+
+  function resetUI() {
+    loadingContainer.classList.remove('active');
+    resultSection.classList.remove('active');
+    resultContent.textContent = '';
+    chartsContainer.innerHTML = '';
+    hideError();
+  }
+
+  function setLoading(loading) {
+    if (loading) {
+      submitBtn.disabled = true;
+      submitBtn.textContent = '分析中...';
+      loadingContainer.classList.add('active');
+      resultSection.classList.remove('active');
+      hideError();
+    } else {
+      submitBtn.disabled = false;
+      submitBtn.innerHTML = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg> 开始分析';
+      loadingContainer.classList.remove('active');
+    }
+  }
+
+  function getFileExtension(name) {
+    return name.split('.').pop().toLowerCase();
+  }
+
+  function isValidFileType(name) {
+    var ext = getFileExtension(name);
+    return ext === 'xlsx' || ext === 'xls' || ext === 'csv' || ext === 'pdf';
+  }
+
+  // ── Render file list ──
+  function renderFileList() {
+    fileList.innerHTML = '';
+    if (selectedFiles.length === 0) {
+      uploadZone.classList.remove('has-file');
+      return;
+    }
+    uploadZone.classList.add('has-file');
+
+    var totalSize = 0;
+    selectedFiles.forEach(function (f, idx) {
+      totalSize += f.size;
+
+      var item = document.createElement('div');
+      item.className = 'file-list-item';
+
+      var badge = document.createElement('span');
+      badge.className = 'file-item-badge';
+      badge.textContent = f.name.split('.').pop().toUpperCase();
+
+      var nameSpan = document.createElement('span');
+      nameSpan.className = 'file-item-name';
+      nameSpan.textContent = f.name;
+
+      var sizeSpan = document.createElement('span');
+      sizeSpan.className = 'file-item-size';
+      sizeSpan.textContent = formatFileSize(f.size);
+
+      var removeBtn = document.createElement('span');
+      removeBtn.className = 'file-item-remove';
+      removeBtn.innerHTML = '&times;';
+      removeBtn.title = '移除';
+      removeBtn.addEventListener('click', function (e) {
+        e.stopPropagation();
+        selectedFiles.splice(idx, 1);
+        renderFileList();
+        // Reset fileInput if all removed
+        if (selectedFiles.length === 0) {
+          fileInput.value = '';
+        }
+      });
+
+      item.append(badge, nameSpan, sizeSpan, removeBtn);
+      fileList.appendChild(item);
+    });
+
+    // Summary line
+    if (selectedFiles.length > 1) {
+      var summary = document.createElement('div');
+      summary.className = 'file-list-summary';
+      summary.textContent = '已选择 ' + selectedFiles.length + ' 个文件，共 ' + formatFileSize(totalSize);
+      fileList.appendChild(summary);
+    }
+  }
+
+  // ── Add files ──
+  function addFiles(fileArray) {
+    hideError();
+    var added = false;
+    for (var i = 0; i < fileArray.length; i++) {
+      var file = fileArray[i];
+      if (!file) continue;
+      if (!isValidFileType(file.name)) {
+        showError('不支持的文件格式: ' + file.name + '，仅支持 .xlsx / .xls / .csv');
+        continue;
+      }
+      // Avoid duplicates by name+size
+      var dup = selectedFiles.some(function (f) {
+        return f.name === file.name && f.size === file.size;
+      });
+      if (!dup) {
+        selectedFiles.push(file);
+        added = true;
+      }
+    }
+    if (added) renderFileList();
+  }
+
+  // ── Events ──
+  uploadZone.addEventListener('click', function () {
+    fileInput.click();
+  });
+
+  fileInput.addEventListener('change', function () {
+    if (fileInput.files && fileInput.files.length > 0) {
+      addFiles(Array.from(fileInput.files));
+      fileInput.value = '';
+    }
+  });
+
+  uploadZone.addEventListener('dragover', function (e) {
+    e.preventDefault();
+    uploadZone.classList.add('drag-over');
+  });
+
+  uploadZone.addEventListener('dragleave', function () {
+    uploadZone.classList.remove('drag-over');
+  });
+
+  uploadZone.addEventListener('drop', function (e) {
+    e.preventDefault();
+    uploadZone.classList.remove('drag-over');
+    if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+      addFiles(Array.from(e.dataTransfer.files));
+    }
+  });
+
+  // ── Streaming Submit ──
+  var currentAbortController = null;
+
+  submitBtn.addEventListener('click', function () {
+    if (selectedFiles.length === 0) {
+      showError('请先选择要分析的数据文件');
+      return;
+    }
+
+    var question = questionInput.value.trim();
+    if (!question) {
+      showError('请输入分析需求');
+      return;
+    }
+
+    hideError();
+    resultSection.classList.remove('active');
+    chartsContainer.innerHTML = '';
+
+    // Show streaming indicator
+    loadingContainer.innerHTML = '<div class="spinner"></div>' +
+      '<div class="loading-text" id="streamStatus">正在分析…</div>' +
+      '<div class="loading-hint">实时接收 DeepSeek 分析结果</div>';
+    loadingContainer.classList.add('active');
+    submitBtn.disabled = false;
+    submitBtn.textContent = '停止分析';
+    submitBtn.classList.add('btn-stop');
+
+    // Prepare result area for streaming
+    resultContent.innerHTML = '<div class="output-block" id="streamOutput" style="min-height:60px;color:var(--text-muted);">等待模型响应…</div>';
+    resultSection.classList.add('active');
+    resultSection.scrollIntoView({ behavior: 'smooth', block: 'start' });
+
+    var formData = new FormData();
+    selectedFiles.forEach(function (f) {
+      formData.append('files', f);
+    });
+    formData.append('question', question);
+
+    var controller = new AbortController();
+    currentAbortController = controller;
+
+    // Create session
+    var q = question;
+    var fnames = selectedFiles.map(function (fi) { return fi.name; });
+    createSession(q, fnames, controller);
+
+    var fullText = '';
+    var thinkText = '';
+    var inThink = true;  // GGUF: first chunks are think; switches to false on </think>
+    var thinkOpener = '<think>';
+    var thinkCloser = '</think>';
+    var thinkBuf = '';   // sliding buffer for cross-chunk boundary detection
+    function getStreamOutput() { return document.getElementById('streamOutput'); }
+
+    function findThinkEnd(text) {
+      // Check multiple patterns for think block termination
+      var patterns = [thinkCloser, '<Answer>', '<answer>'];
+      var idx = -1;
+      var matchLen = 0;
+      for (var i = 0; i < patterns.length; i++) {
+        var pos = text.indexOf(patterns[i]);
+        if (pos !== -1 && (idx === -1 || pos < idx)) {
+          idx = pos;
+          matchLen = patterns[i].length;
+        }
+      }
+      // Regex fallback
+      if (idx === -1) {
+        var m = text.match(/<\s*\/\s*think\s*>/i);
+        if (m) { idx = m.index; matchLen = m[0].length; }
+      }
+      if (idx === -1) {
+        var m2 = text.match(/<\s*Answer\s*>/i);
+        if (m2) { idx = m2.index; matchLen = m2[0].length; }
+      }
+      return idx === -1 ? null : { idx: idx, len: matchLen };
+    }
+
+    // Build think block during streaming
+    function ensureThinkBlock() {
+      var tb = document.getElementById('liveThinkBlock');
+      if (!tb && thinkText) {
+        tb = document.createElement('div');
+        tb.id = 'liveThinkBlock';
+        tb.className = 'think-block open';
+        tb.innerHTML =
+          '<button class="think-toggle"><span class="arrow">&#9660;</span> 思考过程 <span class="think-badge" id="liveThinkBadge">0 字</span></button>' +
+          '<div class="think-content" id="liveThinkContent"></div>';
+        var toggle = tb.querySelector('.think-toggle');
+        toggle.addEventListener('click', function () { tb.classList.toggle('open'); });
+        // Insert at top
+        if (resultContent.firstChild) {
+          resultContent.insertBefore(tb, resultContent.firstChild);
+        } else {
+          resultContent.appendChild(tb);
+        }
+      }
+      return tb;
+    }
+
+    fetch('/analyze/stream', {
+      method: 'POST',
+      body: formData,
+      signal: controller.signal
+    }).then(function (response) {
+      if (!response.ok) {
+        return response.json().then(function (err) {
+          throw new Error(err.error || 'HTTP ' + response.status);
+        });
+      }
+
+      var reader = response.body.getReader();
+      var decoder = new TextDecoder();
+      var buffer = '';
+
+      function read() {
+        return reader.read().then(function (result) {
+          if (result.done) { return; }
+
+          buffer += decoder.decode(result.value, { stream: true });
+          var lines = buffer.split('\n');
+          buffer = lines.pop();
+
+          lines.forEach(function (line) {
+            if (!line.startsWith('data: ')) return;
+            var dataStr = line.substring(6);
+            try {
+              var data = JSON.parse(dataStr);
+            } catch (e) { return; }
+
+            if (data.type === 'think') {
+              thinkText += data.content;
+              inThink = false;  // SSE think events → text stream is output
+              ensureThinkBlock();
+              var tc = document.getElementById('liveThinkContent');
+              var tb = document.getElementById('liveThinkBadge');
+              if (tc) tc.textContent = thinkText;
+              if (tb) tb.textContent = thinkText.length + ' 字';
+            } else if (data.type === 'text') {
+              var chunk = data.content;
+
+              if (inThink) {
+                // Strip leading <think> from first chunk
+                if (thinkText === '' && chunk.indexOf(thinkOpener) === 0) {
+                  chunk = chunk.substring(thinkOpener.length);
+                }
+                // Accumulate into sliding buffer for cross-chunk boundary detection
+                thinkBuf += chunk;
+                thinkText += chunk;
+                chunk = '';
+
+                // Search for think end in the buffer (last 200 chars to avoid O(n²))
+                var searchStart = Math.max(0, thinkBuf.length - 200);
+                var searchText = thinkBuf.substring(searchStart);
+                var result = findThinkEnd(searchText);
+
+                if (result) {
+                  // Found the boundary — rewind thinkText to before the tag
+                  var globalIdx = searchStart + result.idx;
+                  var beforeTag = thinkBuf.substring(0, globalIdx);
+                  var afterTag = thinkBuf.substring(globalIdx + result.len);
+                  thinkText = beforeTag;
+                  chunk = afterTag;
+                  thinkBuf = '';
+                  inThink = false;
+                }
+
+                // Update live think block
+                if (thinkText) {
+                  ensureThinkBlock();
+                  var tc = document.getElementById('liveThinkContent');
+                  var tb = document.getElementById('liveThinkBadge');
+                  if (tc) tc.textContent = thinkText;
+                  if (tb) tb.textContent = thinkText.length + ' 字';
+                }
+              }
+
+              if (chunk) {
+                fullText += chunk;
+                // Real-time update to active session
+                if (activeSid) { var cs = getSession(activeSid); if (cs && cs.status === 'running') { cs.outputText = fullText; cs.thinkText = thinkText; } }
+                // Throttle rendering: batch updates every 150ms
+                if (!window._renderTimer) {
+                  window._renderTimer = setTimeout(function () {
+                    window._renderTimer = null;
+                    var so = document.getElementById('streamOutput');
+                    if (so) { so.innerHTML = renderMarkdown(fullText); }
+                  }, 150);
+                }
+              }
+
+              var status = inThink ? ('思考中… (' + thinkText.length + ' 字)') : ('正在分析… (' + fullText.length + ' 字)');
+              document.getElementById('streamStatus').textContent = status;
+              resultContent.scrollTop = resultContent.scrollHeight;
+            } else if (data.type === 'charts') {
+              chartsContainer.innerHTML = '';
+              if (data.images && data.images.length > 0) {
+                data.images.forEach(function (img) {
+                  var item = document.createElement('div');
+                  item.className = 'chart-item';
+                  var hdr = document.createElement('div');
+                  hdr.className = 'chart-item-header';
+                  hdr.textContent = img[0] || '图表';
+                  var imgEl = document.createElement('img');
+                  imgEl.src = img[1];
+                  imgEl.alt = img[0] || '图表';
+                  imgEl.loading = 'lazy';
+                  item.appendChild(hdr);
+                  item.appendChild(imgEl);
+                  chartsContainer.appendChild(item);
+                });
+              }
+            } else if (data.type === 'error') {
+              showError(data.content);
+            } else if (data.type === 'done') {
+              // Save to history
+              var question = questionInput.value.trim();
+              var filenames = selectedFiles.map(function (f) { return f.name; });
+              var imgData = [];
+              chartsContainer.querySelectorAll('.chart-item img').forEach(function (img) {
+                imgData.push([img.alt || '图表', img.src]);
+              });
+              // Combine think (from SSE events) + output for final render
+              var finalOut;
+              if (thinkText && !fullText) {
+                // Only think, no output — treat everything as body
+                finalOut = thinkText;
+              } else if (thinkText) {
+                // SSE think + text output — wrap think in tags for proper fold
+                finalOut = '<think>' + thinkText + '</think>\n' + fullText;
+              } else {
+                finalOut = fullText;
+              }
+              // Flush pending render
+              if (window._renderTimer) { clearTimeout(window._renderTimer); window._renderTimer = null; }
+              (document.getElementById('streamOutput') || {}).innerHTML = renderMarkdown(fullText);
+
+              // Save to session
+              if (activeSid) { var cur = getSession(activeSid); if (cur) { cur.thinkText = thinkText; cur.outputText = fullText; cur.images = imgData; cur.status = 'done'; cur.controller = null; persistSessions(); } }
+              document.getElementById('streamStatus').textContent = '分析完成';
+              renderResult(finalOut);
+              loadingContainer.classList.remove('active');
+              submitBtn.disabled = false;
+              submitBtn.classList.remove('btn-stop');
+              submitBtn.innerHTML = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg> 开始分析';
+              return;
+            }
+          });
+
+          return read();
+        });
+      }
+
+      return read();
+    }).catch(function (err) {
+      if (err.name === 'AbortError') {
+        loadingContainer.classList.remove('active');
+        submitBtn.disabled = false;
+        submitBtn.classList.remove('btn-stop');
+        submitBtn.innerHTML = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg> 开始分析';
+        return;
+      }
+      loadingContainer.classList.remove('active');
+      submitBtn.disabled = false;
+      submitBtn.classList.remove('btn-stop');
+      submitBtn.innerHTML = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg> 开始分析';
+      showError('分析失败：' + (err.message || '网络错误'));
+    });
+  });
+
+  // Intercept submit button during streaming: stop
+  submitBtn.addEventListener('click', function (e) {
+    if (submitBtn.classList.contains('btn-stop') && currentAbortController) {
+      e.stopImmediatePropagation();
+      currentAbortController.abort();
+      currentAbortController = null;
+    }
+  }, true); // capture phase
+
+  // ── Report rendering (think + output split) ──
+  function parseThinkAndOutput(text) {
+    // Priority: <Answer>...</Answer> tag -> output, rest is thinking
+    var answerRe = /<\s*Answer\s*>([\s\S]*?)<\s*\/\s*Answer\s*>/i;
+    var answerMatch = text.match(answerRe);
+
+    if (answerMatch) {
+      var thinkText = text.replace(answerRe, '').trim();
+      // Also clean up the report header/footer from the thinking part
+      // Remove lines like ====, ----, file info, report end, etc.
+      thinkText = thinkText
+        .replace(/={3,}[\s\S]*?={3,}/g, '')
+        .replace(/-{3,}[\s\S]*?-{3,}/g, '')
+        .replace(/分析文件[\s\S]*?数据总量[^\n]*\n/g, '')
+        .trim();
+      var outputText = answerMatch[1].trim();
+      return { think: thinkText, output: outputText };
+    }
+
+    // Fallback: standard  ...  tags
+    var thinkRe = /<\s*think\s*>([\s\S]*?)<\s*\/\s*think\s*>/i;
+    var thinkMatch = text.match(thinkRe);
+    if (thinkMatch) {
+      var tThink = thinkMatch[1].trim();
+      var tOutput = text.replace(thinkRe, '').trim().replace(/\n{3,}/g, '\n\n');
+      return { think: tThink, output: tOutput };
+    }
+
+    // Fallback: any non-standard reasoning tags (Analyze, Understand, Reasoning, etc.)
+    // Everything except the last answer-like section is thinking
+    var multiTagRe = /<\s*(Analyze|Understand|Reasoning|思考|分析|理解|Planning|Plan)\s*>[\s\S]*?<\s*\/\s*\1\s*>/gi;
+    var tagMatch = text.match(multiTagRe);
+    if (tagMatch && tagMatch.length > 0) {
+      // Extract all tagged sections as thinking
+      var allThink = tagMatch.map(function (m) {
+        var innerRe = /<\s*[^>]+\s*>([\s\S]*?)<\s*\/\s*[^>]+\s*>/i;
+        var inner = m.match(innerRe);
+        return inner ? inner[1].trim() : m;
+      }).join('\n\n');
+
+      // Remove all tag blocks from text, what remains is output
+      var remaining = text;
+      tagMatch.forEach(function (m) {
+        remaining = remaining.replace(m, '');
+      });
+      remaining = remaining.trim().replace(/\n{3,}/g, '\n\n');
+
+      // If remaining is empty or just header/footer lines, use entire text after tags
+      if (!remaining || remaining.length < 50) {
+        remaining = text;
+        tagMatch.forEach(function (m) {
+          remaining = remaining.replace(m, '');
+        });
+        remaining = remaining.replace(/={3,}[\s\S]*?={3,}/g, '').replace(/-{3,}[\s\S]*?-{3,}/g, '').trim();
+        remaining = remaining.replace(/\n{3,}/g, '\n\n');
+      }
+
+      return { think: allThink, output: remaining };
+    }
+
+    return { think: '', output: text };
+  }
+
+  // ── Vanilla Markdown → HTML renderer ──
+  function renderMarkdown(text) {
+    // Escape HTML entities
+    function esc(s) {
+      return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    }
+
+    // Extract and protect code blocks
+    var codeBlocks = [];
+    var html = text.replace(/```(\w*)\n([\s\S]*?)```/g, function (_, lang, code) {
+      codeBlocks.push('<pre><code class="lang-' + esc(lang) + '">' + esc(code.trimEnd()) + '</code></pre>');
+      return '\x00CODE' + (codeBlocks.length - 1) + '\x00';
+    });
+
+    // Escape remaining text
+    html = esc(html);
+
+    // Restore code blocks
+    html = html.replace(/\x00CODE(\d+)\x00/g, function (_, i) { return codeBlocks[parseInt(i)]; });
+
+    // Tables (must come before hr)
+    html = html.replace(/^\|(.+)\|\n\|[-\s|:]+\|\n((?:^\|.+\|\n?)+)/gm, function (_, header, rows) {
+      var hcells = header.split('|').map(function (c) { return '<th>' + c.trim() + '</th>'; }).join('');
+      var rrows = rows.trim().split('\n').map(function (r) {
+        return '<tr>' + r.split('|').filter(function (c) { return c !== ''; }).map(function (c) {
+          return '<td>' + c.trim() + '</td>';
+        }).join('') + '</tr>';
+      }).join('');
+      return '<table><thead><tr>' + hcells + '</tr></thead><tbody>' + rrows + '</tbody></table>';
+    });
+
+    // Headings
+    html = html.replace(/^###### (.+)$/gm, '<h6>$1</h6>');
+    html = html.replace(/^##### (.+)$/gm, '<h5>$1</h5>');
+    html = html.replace(/^#### (.+)$/gm, '<h4>$1</h4>');
+    html = html.replace(/^### (.+)$/gm, '<h3>$1</h3>');
+    html = html.replace(/^## (.+)$/gm, '<h2>$1</h2>');
+    html = html.replace(/^# (.+)$/gm, '<h1>$1</h1>');
+
+    // Horizontal rule
+    html = html.replace(/^---$/gm, '<hr>');
+    html = html.replace(/^\*\*\*$/gm, '<hr>');
+    html = html.replace(/^___$/gm, '<hr>');
+
+    // Bold-italic, bold, italic
+    html = html.replace(/\*\*\*(.+?)\*\*\*/g, '<strong><em>$1</em></strong>');
+    html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+    html = html.replace(/\*(.+?)\*/g, '<em>$1</em>');
+
+    // Inline code (not inside pre)
+    html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
+
+    // Unordered lists: group consecutive <li> and wrap in <ul>
+    html = html.replace(/^[*-] (.+)$/gm, '<li>$1</li>');
+    html = html.replace(/((?:<li>.*<\/li>\n?)+)/g, function (match) {
+      return '<ul>' + match.replace(/\n/g, '') + '</ul>';
+    });
+
+    // Ordered lists
+    html = html.replace(/^\d+\. (.+)$/gm, '<li>$1</li>');
+    // Re-wrap any remaining <li> groups in <ol> (those that aren't already in <ul>)
+    html = html.replace(/<li>/g, '\x00LI\x00');
+    html = html.replace(/<\/li>/g, '\x00/LI\x00');
+    html = html.replace(/(\x00LI\x00(?:[^\x00]*?)\x00\/LI\x00\s*)+/g, function (match) {
+      if (match.indexOf('<ul>') === -1) {
+        return '<ol>' + match.replace(/\x00LI\x00/g, '<li>').replace(/\x00\/LI\x00/g, '</li>').replace(/\n/g, '') + '</ol>';
+      }
+      return match.replace(/\x00LI\x00/g, '<li>').replace(/\x00\/LI\x00/g, '</li>');
+    });
+    html = html.replace(/\x00LI\x00/g, '<li>').replace(/\x00\/LI\x00/g, '</li>');
+
+    // Links
+    html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank">$1</a>');
+
+    // Paragraphs: split on double newlines, wrap non-block elements in <p>
+    var blocks = html.split(/\n\n+/);
+    html = blocks.map(function (block) {
+      block = block.trim();
+      if (!block) return '';
+      // Don't wrap block-level elements
+      if (/^<(h[1-6]|ul|ol|li|table|pre|hr|div|blockquote)/.test(block)) {
+        return block;
+      }
+      // Replace single newlines with <br> within paragraphs
+      block = block.replace(/\n/g, '<br>');
+      return '<p>' + block + '</p>';
+    }).join('\n');
+
+    // Clean up empty paragraphs
+    html = html.replace(/<p>\s*<\/p>/g, '');
+    html = html.replace(/<p><br>\s*<\/p>/g, '');
+
+    return html;
+  }
+
+  function renderResult(text) {
+    var parsed = parseThinkAndOutput(text);
+    resultContent.innerHTML = '';
+
+    if (parsed.think) {
+      var block = document.createElement('div');
+      block.className = 'think-block';
+
+      var toggle = document.createElement('button');
+      toggle.className = 'think-toggle';
+      toggle.innerHTML = '<span class="arrow">&#9654;</span> 思考过程 <span class="think-badge">' +
+        parsed.think.length + ' 字</span>';
+
+      var content = document.createElement('div');
+      content.className = 'think-content';
+      content.textContent = parsed.think;
+
+      toggle.addEventListener('click', function () {
+        block.classList.toggle('open');
+      });
+
+      block.appendChild(toggle);
+      block.appendChild(content);
+      resultContent.appendChild(block);
+    }
+
+    if (parsed.output) {
+      var label = document.createElement('div');
+      label.className = 'output-label';
+      label.textContent = parsed.think ? '分析结果' : '';
+
+      var outputDiv = document.createElement('div');
+      outputDiv.className = 'output-block';
+      outputDiv.innerHTML = renderMarkdown(parsed.output);
+
+      if (label.textContent) resultContent.appendChild(label);
+      resultContent.appendChild(outputDiv);
+    }
+  }
+
+  // ── Copy (only output when think is collapsed) ──
+  copyBtn.addEventListener('click', function () {
+    // If think block exists and is collapsed, only copy output
+    var thinkBlock = resultContent.querySelector('.think-block');
+    var thinkVisible = thinkBlock && thinkBlock.classList.contains('open');
+    var outputBlock = resultContent.querySelector('.output-block');
+
+    var text;
+    if (thinkBlock && !thinkVisible && outputBlock) {
+      // Think collapsed: copy only output
+      text = outputBlock.textContent || '';
+    } else {
+      // Think expanded or no think block: copy everything
+      text = resultContent.textContent || '';
+    }
+
+    if (!text) return;
+
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(function () {
+        var orig = copyBtn.innerHTML;
+        copyBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 6L9 17l-5-5"/></svg> 已复制';
+        setTimeout(function () { copyBtn.innerHTML = orig; }, 2000);
+      }).catch(function () {
+        fallbackCopy(text);
+      });
+    } else {
+      fallbackCopy(text);
+    }
+  });
+
+  function fallbackCopy(text) {
+    var ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.left = '-9999px';
+    document.body.appendChild(ta);
+    ta.focus();
+    ta.select();
+    try {
+      document.execCommand('copy');
+      var orig = copyBtn.innerHTML;
+      copyBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 6L9 17l-5-5"/></svg> 已复制';
+      setTimeout(function () { copyBtn.innerHTML = orig; }, 2000);
+    } catch (e) {
+      showError('复制失败，请手动选择文本复制');
+    }
+    document.body.removeChild(ta);
+  }
+
+  // ── New Analysis ──
+  newAnalysisBtn.addEventListener('click', function () {
+    selectedFiles = [];
+    fileInput.value = '';
+    renderFileList();
+    questionInput.value = '请全面分析经营数据，给出关键洞察和建议';
+    resetUI();
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  });
+
+  // ── History management ──
+  var SESSIONS_KEY = 'deepanalyze-sessions';
+  function persistSessions() { var ts = sessions.filter(function(s){return s.status==='done';}); try{localStorage.setItem(SESSIONS_KEY,JSON.stringify(ts.slice(0,50)));}catch(e){} }
+
+  function loadPersisted() {
+    try { return JSON.parse(localStorage.getItem(SESSIONS_KEY)) || []; } catch (e) { return []; }
+  }
+
+  function createSession(question, filenames, ctrl) {
+    var sid = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+    var s = { id: sid, question: question, files: filenames, time: new Date().toLocaleString('zh-CN'),
+      thinkText: '', outputText: '', images: [], status: 'running', controller: ctrl };
+    sessions.unshift(s); activeSid = sid; renderSessionList(); return s;
+  }
+
+  function getSession(sid) {
+    for (var i = 0; i < sessions.length; i++) { if (sessions[i].id === sid) return sessions[i]; } return null;
+  }
+
+  function switchToSession(sid) {
+    if (sid === activeSid) return;
+    activeSid = sid;
+    var s = getSession(sid) || loadPersisted().find(function (ps) { return ps.id === sid; });
+    if (!s) return;
+    resultSection.classList.add('active');
+    if (s.status === 'running') {
+      loadingContainer.classList.add('active');
+      submitBtn.disabled = false; submitBtn.textContent = '停止分析'; submitBtn.classList.add('btn-stop');
+      resultContent.innerHTML = '<div class="output-block" id="streamOutput">' + renderMarkdown(s.outputText) + '</div>';
+      if (s.thinkText) {
+        var tb = document.createElement('div'); tb.className = 'think-block open';
+        tb.innerHTML = '<button class="think-toggle"><span class="arrow">&#9660;</span> 思考中</button><div class="think-content">' + s.thinkText + '</div>';
+        resultContent.insertBefore(tb, resultContent.firstChild);
+      }
+    } else {
+      loadingContainer.classList.remove('active');
+      submitBtn.disabled = false; submitBtn.classList.remove('btn-stop');
+      submitBtn.innerHTML = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg> 开始分析';
+      var fo = (s.thinkText ? '<think>' + s.thinkText + '</think>\n' : '') + s.outputText;
+      renderResult(fo);
+      chartsContainer.innerHTML = '';
+      (s.images || []).forEach(function (img) {
+        var item = document.createElement('div'); item.className = 'chart-item';
+        var h = document.createElement('div'); h.className = 'chart-item-header'; h.textContent = img[0] || '图表';
+        var ie = document.createElement('img'); ie.src = img[1]; ie.alt = img[0] || '图表'; ie.loading = 'lazy';
+        item.appendChild(h); item.appendChild(ie); chartsContainer.appendChild(item);
+      });
+    }
+    resultSection.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    renderSessionList();
+  }
+
+  function renderSessionList() {
+    var p = loadPersisted();
+    var all = sessions.concat(p.filter(function (ps) { return !sessions.some(function (s) { return s.id === ps.id; }); }));
+    historyList.innerHTML = '';
+    if (!all.length) { historyList.innerHTML = '<div style="padding:20px;text-align:center;color:var(--text-muted);font-size:12px;">-</div>'; return; }
+    all.forEach(function (s) {
+      var item = document.createElement('div'); item.className = 'history-item';
+      if (s.id === activeSid) item.classList.add('selected');
+      var dot = s.status === 'running' ? '<span style="color:var(--primary);">● </span>' : '';
+      item.innerHTML = dot + '<div class="history-item-title">' + escHtml(s.question.substring(0, 35)) + '</div>' +
+        '<div class="history-item-meta">' + escHtml((s.files || []).join(', ').substring(0, 25)) + ' · ' + s.time + '</div>';
+      item.addEventListener('click', function () { switchToSession(s.id); });
+      historyList.appendChild(item);
+    });
+  }
+
+  function escHtml(str) { var d = document.createElement('div'); d.textContent = str || ''; return d.innerHTML; }
+
+  function loadHistoryEntry(idx) { switchToSession(sessions[idx] ? sessions[idx].id : null); }
+
+  historyToggle.addEventListener('click', function () { historySidebar.classList.toggle('open'); });
+  historyClear.addEventListener('click', function () {
+    if (confirm('清空所有会话？')) { sessions = []; activeSid = null; localStorage.removeItem(SESSIONS_KEY); renderSessionList(); resultSection.classList.remove('active'); }
+  });
+
+  var sessions = []; var activeSid = null; renderSessionList();
+
+  // ── Download as .md ──
+  downloadBtn.addEventListener('click', function () {
+    var text = '';
+    // Use session data if available, otherwise scrape DOM
+    var thinkBlock = resultContent.querySelector('.think-block');
+    var thinkVisible = thinkBlock && thinkBlock.classList.contains('open');
+
+    if (activeSid) {
+      var s = getSession(activeSid) || loadPersisted().find(function(ps){return ps.id===activeSid;});
+      if (s) {
+        if (thinkVisible && s.thinkText) text += '> 思考过程\n\n' + s.thinkText + '\n\n---\n\n';
+        text += s.outputText || '';
+      }
+    }
+    if (!text) {
+      var ob = resultContent.querySelector('.output-block');
+      if (ob) text = ob.textContent || '';
+    }
+    if (!text) text = resultContent.textContent || '';
+
+    var blob = new Blob([text], { type: 'text/markdown;charset=utf-8' });
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url; a.download = 'DeepAnalyze_' + new Date().toISOString().slice(0,10) + '.md';
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  });
+
+  // ── Download as Word ──
+  var wordBtn = document.getElementById('downloadWordBtn');
+  if (wordBtn) {
+    wordBtn.onclick = function () {
+      var ob = document.querySelector('.output-block');
+      var html = ob ? (ob.innerHTML || '') : '';
+      if (!html) { showError('无内容可导出'); return; }
+      wordBtn.textContent = '生成中...'; wordBtn.disabled = true;
+      fetch('/export/docx', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ html: html, title: '分析报告' })
+      }).then(function (r) {
+        if (!r.ok) return r.json().then(function(e) { throw new Error(e.error); });
+        return r.blob();
+      }).then(function (b) {
+        var u = URL.createObjectURL(b);
+        var a = document.createElement('a');
+        a.href = u; a.download = 'DeepAnalyze_' + new Date().toISOString().slice(0,10) + '.docx';
+        document.body.appendChild(a); a.click(); document.body.removeChild(a);
+        URL.revokeObjectURL(u);
+      }).catch(function (e) { showError('Word导出失败：'+e.message); })
+        .finally(function () {
+          wordBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="2" width="20" height="20" rx="2"/><line x1="6" y1="7" x2="18" y2="7"/><line x1="6" y1="11" x2="18" y2="11"/><line x1="10" y1="15" x2="18" y2="15"/></svg> 下载 Word';
+          wordBtn.disabled = false;
+        });
+    };
+  }
+
+  // ── Theme toggle ──
+  themeToggle.addEventListener('click', function () {
+    toggleTheme();
+  });
+
+  // ── Keyboard shortcuts ──
+  questionInput.addEventListener('keydown', function (e) {
+    if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+      e.preventDefault();
+      submitBtn.click();
+    }
+  });
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,20 @@
+# Python 缓存
+__pycache__/
+*.pyc
+
+# 虚拟环境
+venv/
+.venv/
+
+# API 密钥（如 DEEPSEEK_API_KEY）
+.env
+
+# 本地模型权重（运行时扫描/下载，体积大，不入库）
+models/
+
+# 自动下载的中文字体
+fonts/
+
+# 本地推理二进制（如 llama-server.exe）
+llama-server.exe
+llama-server
