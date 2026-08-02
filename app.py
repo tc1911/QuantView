@@ -628,8 +628,28 @@ def _render_chart_spec(spec, charts, fp_m, fp_sm):
         if not data or not isinstance(data, dict):
             return
 
-        labels = list(data.keys())
-        values = list(data.values())
+        # 模型可能输出字符串数值（"149800"、"24.46%"、"-21,400"），统一强转为 float；
+        # 无法转换的项（如"无数据"）直接跳过，全部无法转换则放弃该图
+        labels = []
+        values = []
+        for k, v in data.items():
+            if isinstance(v, bool):
+                continue
+            if isinstance(v, (int, float)):
+                num = float(v)
+            else:
+                s = str(v).strip().replace("%", "").replace(",", "")
+                try:
+                    num = float(s)
+                except (TypeError, ValueError):
+                    continue
+            # 过滤 NaN / inf / 非有限值
+            if num != num or abs(num) == float("inf"):
+                continue
+            labels.append(k)
+            values.append(num)
+        if not values:
+            return
 
         fig, ax = plt.subplots(figsize=(9, 4.5))
 
