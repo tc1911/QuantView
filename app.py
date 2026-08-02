@@ -1717,50 +1717,55 @@ def _stream_section_worker(q, node, t):
 
 
 def _distributed_analysis_events(prep, question, output_parts):
-    """分布式流式分析：并行分发工作表任务（流式）→ 逐块产出 → 主节点生成总览。
+    """分布式流式分析：并行生成、保序投递 → 主节点生成总览。
 
-    yield ("think"|"text"|"progress", chunk)，并把所有文本块累计进 output_parts 供图表提取。
+    各表在后台并行生成（线程池），但投递严格按任务顺序：
+    每张表的文本块连续流式输出完，才开始下一张表——保证最终报告
+    各表完整不交错。yield ("think"|"text"|"progress", chunk)，
+    所有文本块累计进 output_parts 供图表提取。
     """
     workers = _work_nodes()
     tasks = prep["tasks"]
-    print(f"[分布式] {len(tasks)} 个工作表任务（流式），分发给 {len(workers)} 个节点（含主节点自身）")
+    print(f"[分布式] {len(tasks)} 个工作表任务（并行生成、保序投递），分发给 {len(workers)} 个节点（含主节点自身）")
     sections = []
     failures = 0
     done = 0
     total = len(tasks)
-    q = queue.Queue()
-    pending = len(tasks)
-    section_parts = {}  # id(t) → [文本块]，供总览 prompt 使用
+    # 每个任务独立的队列 + 任务顺序消费
+    task_queues = {id(t): queue.Queue() for t in tasks}
+    task_nodes = {}
 
     for i, t in enumerate(tasks):
         node = workers[i % len(workers)]
-        threading.Thread(target=_stream_section_worker, args=(q, node, t), daemon=True).start()
+        task_nodes[id(t)] = node
+        threading.Thread(target=_stream_section_worker, args=(task_queues[id(t)], node, t), daemon=True).start()
 
-    while pending > 0:
-        kind, t, node, arg = q.get()
-        if kind == "chunk":
-            evt, chunk = arg
-            if evt == "think":
-                yield ("think", chunk)
-            else:
-                output_parts.append(chunk)
-                section_parts.setdefault(id(t), []).append(chunk)
-                yield ("text", chunk)
-        elif kind == "error":
-            failures += 1
-            block = f"\n\n### 工作表「{t['label']}」分析（节点：{node['name']}）\n\n⚠️ 该任务分析失败：{arg}\n"
-            output_parts.append(block)
-            yield ("text", block)
-            pending -= 1
-            done += 1
-            yield ("progress", {"done": done, "total": total})
-        elif kind == "done":
-            parts = section_parts.get(id(t))
-            if parts:
-                sections.append((t["label"], node["name"], "".join(parts).strip()))
-            pending -= 1
-            done += 1
-            yield ("progress", {"done": done, "total": total})
+    for t in tasks:
+        q = task_queues[id(t)]
+        node = task_nodes[id(t)]
+        parts = []
+        while True:
+            kind, t2, node2, arg = q.get()
+            if kind == "chunk":
+                evt, chunk = arg
+                if evt == "think":
+                    yield ("think", chunk)
+                else:
+                    output_parts.append(chunk)
+                    parts.append(chunk)
+                    yield ("text", chunk)
+            elif kind == "error":
+                failures += 1
+                block = f"\n\n### 工作表「{t2['label']}」分析（节点：{node2['name']}）\n\n⚠️ 该任务分析失败：{arg}\n"
+                output_parts.append(block)
+                yield ("text", block)
+                break
+            else:  # done
+                break
+        if parts:
+            sections.append((t["label"], node["name"], "".join(parts).strip()))
+        done += 1
+        yield ("progress", {"done": done, "total": total})
 
     # ── 主节点生成总览 ──
     intro = "\n\n---\n\n## 总览与综合结论（主节点生成）\n\n"
