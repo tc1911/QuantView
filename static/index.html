@@ -138,10 +138,12 @@
   .main-container {
     max-width: 1720px;
     margin: 0 auto;
-    padding: 24px 32px 48px;
+    padding: 16px 32px 24px;
+    height: calc(100vh - 160px);
     display: flex;
     flex-direction: column;
     gap: 20px;
+    overflow: hidden;
   }
 
   /* ── Card ── */
@@ -397,8 +399,6 @@
     white-space: pre-wrap;
     word-wrap: break-word;
     color: var(--text);
-    max-height: 600px;
-    overflow-y: auto;
   }
   .result-content::-webkit-scrollbar { width: 6px; }
   .result-content::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 3px; }
@@ -748,24 +748,27 @@
   [data-theme="dark"] .result-content::-webkit-scrollbar-thumb {
     background: #475569;
   }
-  /* ── 三栏布局：左输入 / 中节点工作 / 右成品 ── */
+  /* ── 三栏布局：左输入 / 中节点工作 / 右成品，各列独立滚动 ── */
   .main-grid {
+    flex: 1;
+    min-height: 0;
     display: grid;
     grid-template-columns: minmax(300px, 360px) minmax(340px, 1fr) minmax(380px, 1fr);
     gap: 20px;
-    align-items: start;
+    align-items: stretch;
   }
   .col-left, .col-mid, .col-right {
+    min-height: 0;
+    overflow-y: auto;
     display: flex;
     flex-direction: column;
     gap: 20px;
     min-width: 0;
+    padding-right: 6px;
   }
-  .node-pane { display: flex; flex-direction: column; max-height: calc(100vh - 120px); }
+  .node-pane { display: flex; flex-direction: column; }
   .node-pane .card-title { flex-shrink: 0; }
   .node-content {
-    flex: 1;
-    overflow-y: auto;
     display: flex;
     flex-direction: column;
     gap: 12px;
@@ -807,7 +810,9 @@
     word-wrap: break-word;
   }
   @media (max-width: 1200px) {
+    .main-container { height: auto; overflow: visible; }
     .main-grid { grid-template-columns: 1fr; }
+    .col-left, .col-mid, .col-right { overflow-y: visible; padding-right: 0; }
     .node-pane { max-height: none; }
   }
 
@@ -902,7 +907,7 @@
   </div><!-- /col-left -->
 
   <!-- 节点工作内容 -->
-  <div class="col-mid">
+  <div class="col-mid" id="colMid">
     <div class="card node-pane" id="nodePaneCard">
       <div class="card-title">节点工作内容</div>
       <div class="node-content" id="nodeContent">
@@ -912,7 +917,7 @@
   </div>
 
   <!-- Result -->
-  <div class="col-right">
+  <div class="col-right" id="colRight">
   <div class="result-section card" id="resultSection">
     <div class="card-title">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M9 12l2 2 4-4"/></svg>
@@ -1404,7 +1409,11 @@ console.log('[QuantView] JS loaded');
 
               var status = inThink ? ('思考中… (' + thinkText.length + ' 字)') : ('正在分析… (' + fullText.length + ' 字)');
               document.getElementById('streamStatus').textContent = status;
-              resultContent.scrollTop = resultContent.scrollHeight;
+              // 右栏跟随滚动（用户已上翻查看时不强制拉回）
+              var rc = document.getElementById('colRight');
+              if (rc && rc.scrollHeight - rc.scrollTop - rc.clientHeight < 160) {
+                rc.scrollTop = rc.scrollHeight;
+              }
             } else if (data.type === 'charts') {
               chartsContainer.innerHTML = '';
               if (data.images && data.images.length > 0) {
@@ -1824,8 +1833,11 @@ console.log('[QuantView] JS loaded');
 
   function midRender() {
     midCards.forEach(function (rec) { rec.body.innerHTML = renderMarkdown(rec.raw); });
-    var nc = document.getElementById('nodeContent');
-    if (nc) nc.scrollTop = nc.scrollHeight;
+    // 中栏跟随滚动（用户已上翻查看时不强制拉回）
+    var col = document.getElementById('colMid');
+    if (col && col.scrollHeight - col.scrollTop - col.clientHeight < 160) {
+      col.scrollTop = col.scrollHeight;
+    }
   }
 
   // 会话回放：从保存的完整报告文本中重建各节点卡片
