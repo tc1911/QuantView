@@ -1970,12 +1970,16 @@ if __name__ == "__main__":
     print("DeepAnalyze - 本地数据分析助手")
     print("=" * 60)
     print()
-    print("启动服务: http://localhost:5000")
-    print("前端页面: http://localhost:5000/")
-    print("分析接口: POST http://localhost:5000/analyze")
+    _port = int(os.environ.get("DEEPANALYZE_PORT", "5000"))
+    if _NODE_LIST:
+        print(f" 运行模式: 分布式主节点（加速节点: {_NODE_LIST}）")
+        print(" 前端页面: http://localhost:%d（加速节点页面对应端口单独访问）" % _port)
+    else:
+        print(f" 运行模式: 单节点")
+        print(" 前端页面: http://localhost:%d/" % _port)
+    print(f" 分析接口: POST http://localhost:{_port}/analyze")
     print()
     print("按 Ctrl+C 停止服务")
     print("=" * 60)
     # 端口可用 DEEPANALYZE_PORT 覆盖（多实例/分布式同机部署时需要）
-    _port = int(os.environ.get("DEEPANALYZE_PORT", "5000"))
     app.run(host="0.0.0.0", port=_port, debug=False)
