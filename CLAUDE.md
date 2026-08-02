@@ -32,6 +32,7 @@ Useful deps: `flask pandas matplotlib numpy` (required); `openpyxl` (required �
 | `DEEPANALYZE_NODES` | `name=url,name=url` 加速节点列表 — 设置了即为**主节点（分布式）模式**，工作表任务轮流分发，主节点只生成总览；不设置则为单节点模式 |
 | `DEEPANALYZE_NODE_TIMEOUT` | 单次节点调用超时秒数（默认 600） |
 | `DEEPANALYZE_HARD_NUMS_LIMIT` | 硬数字进入 prompt 的最大字符数（默认 12000；覆盖全表约需 8500，设小了资金状况/经营预算等表会被截断） |
+| `DEEPANALYZE_PORT` | 服务端口（默认 5000；同机跑主/加速双实例时用 `start_node.bat` 的 5001） |
 
 ## Architecture
 

@@ -1948,4 +1948,6 @@ if __name__ == "__main__":
     print()
     print("按 Ctrl+C 停止服务")
     print("=" * 60)
-    app.run(host="0.0.0.0", port=5000, debug=False)
+    # 端口可用 DEEPANALYZE_PORT 覆盖（多实例/分布式同机部署时需要）
+    _port = int(os.environ.get("DEEPANALYZE_PORT", "5000"))
+    app.run(host="0.0.0.0", port=_port, debug=False)
