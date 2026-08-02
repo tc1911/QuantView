@@ -29,6 +29,8 @@ Useful deps: `flask pandas matplotlib numpy` (required); `pdfplumber` (PDF table
 | `DEEPSEEK_THINKING` | `1/true` → use `deepseek-reasoner` (streams `reasoning_content` as "think" events) |
 | `DEEPANALYZE_MODEL` | Force-select a model by name from the `models/` scan |
 | `LLAMA_SERVER_PATH` | Path to llama-server binary (default auto-search, incl. `C:/Users/tc191/llama-cpp/llama-server.exe`) |
+| `DEEPANALYZE_NODES` | `name=url,name=url` 加速节点列表 — 设置了即为**主节点（分布式）模式**，工作表任务轮流分发，主节点只生成总览；不设置则为单节点模式 |
+| `DEEPANALYZE_NODE_TIMEOUT` | 单次节点调用超时秒数（默认 600） |
 
 ## Architecture
 
@@ -37,6 +39,8 @@ Useful deps: `flask pandas matplotlib numpy` (required); `pdfplumber` (PDF table
 1. **DeepSeek API** (debug mode): `_call_deepseek_api` / `_call_deepseek_api_stream` — plain `urllib` POST to an OpenAI-compatible `/chat/completions` endpoint. The stream variant yields `("think", ...)` and `("text", ...)` tuples.
 2. **GGUF via external llama-server**: spawns `llama-server -m <model> --port N -ngl 99 -c 65536` as a subprocess (port auto-increments from 8080 if busy), waits on `/health`, then sets `DEEPSEEK_API_URL` to the local server so **the same API call path is reused**. Killed via `atexit`.
 3. **HuggingFace via transformers**: lazily imported inside the load function (torch/transformers are not imported at module load). Streams via `TextIteratorStreamer` + thread.
+
+All three are wrapped by **`_run_inference(prompt, max_tokens, stream)`** — the single inference entry point: `stream=False` returns text, `stream=True` returns a `("think"|"text", chunk)` generator. New code paths (e.g. `/analyze/sheet`) call it instead of reaching into backends directly.
 
 ### Model discovery (`_scan_models`, `_select_model`)
 
@@ -51,9 +55,20 @@ All file parsing lives in **`file_processing.py`** (no Flask dependency; pure pa
 3. `extract_hard_numbers_core` (also in `file_processing.py`) — finance-specific: re-reads Excel bytes to extract 合计/总计-style rows as "hard numbers" with normalized period labels (`2026H1`, `2026Q3`, 期末/年初 etc., see `_norm_period`). When present, the prompt marks them as authoritative ("禁止修改，必须原样引用") and **omits raw head/tail samples** so the model can't invent figures. This is an anti-hallucination mechanism — preserve it when editing prompt logic.
 4. `_prepare_analysis_input_impl` (in `app.py`) — assembles the giant Chinese system prompt: hard numbers first, then per-file summaries, then the user question, then a strict analysis protocol (per-section deep-dive, requirement checklist table, "no vague numbers" rules) and a requirement for a `chartjson` block at the end. File buffers are re-read from saved bytes because `FileStorage` streams are single-use.
 
+### Distributed multi-node mode (master + accelerator nodes)
+
+Enabled by `DEEPANALYZE_NODES`; unset → classic single-node behavior. Flow (streaming and non-streaming paths both support it):
+
+1. `_prepare_distributed_input_impl` — per-sheet split: each sheet of each Excel file becomes one task (CSV/PDF = whole file, one task). Per-sheet summary from `df_summary` on the filtered DataFrame; per-sheet hard numbers from `extract_hard_numbers_by_sheet` (parses `extract_hard_numbers_core` output by `【工作表名】` headers).
+2. `_build_sheet_prompt` / `_build_overview_prompt` — compact prompts preserving the anti-hallucination rules (hard numbers must be quoted verbatim, no fabricated periods, `chartjson` required at the end).
+3. `_distributed_analysis_events` (SSE) / `_perform_analysis_distributed` (non-streaming) — submit tasks to `ThreadPoolExecutor` (`max_workers = node count`), round-robin across nodes via `_call_node_sheet` (POST `/analyze/sheet` on each node). Failed nodes degrade to a ⚠️ failure section instead of aborting the report.
+4. After all sections: the master's own model runs the overview prompt (`_run_inference`), producing 总览/综合结论. The final report = per-sheet sections + overview, and all `chartjson` blocks from all parts are rendered (multiple blocks supported via `finditer`).
+
+Each node is just another `app.py` instance — it needs its own model (or `DEEPANALYZE_DEBUG` + API key) and exposes `/analyze/sheet` automatically. Workers must NOT set `DEEPANALYZE_NODES` (avoid recursive distribution).
+
 ### Charts
 
-- AI-directed: `_generate_charts_from_json` extracts a ```chartjson``` code block from the model output (`[{"title", "type": bar|pie|bar_h|line, "data": {label: value}}]`) and renders each spec to base64 PNG.
+- AI-directed: `_generate_charts_from_json` extracts **all** ```chartjson``` code blocks from the model output (`[{"title", "type": bar|pie|bar_h|line, "data": {label: value}}]`) and renders each spec to base64 PNG (multiple blocks — one per distributed section/overview — are merged; bad blocks are skipped).
 - Fallback `_generate_charts`: automatic heuristics — detects 对比 pairs (期末/年初, 预算/实际, 本期/同期…), scores numeric columns (coefficient of variation × coverage), draws histograms/rankings/category frequencies.
 - Chinese font handling (`_ensure_chinese_font`): project `fonts/` dir → known Windows/Linux/macOS paths → `fc-list` → auto-download Noto Sans SC into `fonts/`. If no font is found, chart text renders as boxes. Matplotlib must use `Agg` backend.
 
@@ -62,8 +77,9 @@ All file parsing lives in **`file_processing.py`** (no Flask dependency; pure pa
 | Route | Purpose |
 |---|---|
 | `GET /` | Serve `index.html` (no-cache headers) |
-| `POST /analyze` | Multipart `files` + `question` → `{result, images}` (non-streaming) |
-| `POST /analyze/stream` | Same input, SSE stream of `{type: text|think|charts|error|done}` events |
+| `POST /analyze` | Multipart `files` + `question` → `{result, images}` (non-streaming; single-node and distributed) |
+| `POST /analyze/stream` | Same input, SSE stream of `{type: text|think|charts|error|done}` events (single-node and distributed) |
+| `POST /analyze/sheet` | **Accelerator-node job endpoint**: JSON `{prompt, max_tokens}` → `{result}`. Calls `_run_inference` non-streaming |
 | `POST /export/docx` | Receives HTML report JSON, spawns `export_docx.py` as a subprocess, returns the .docx |
 
 ### Frontend (`static/index.html`)

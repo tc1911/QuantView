@@ -23,11 +23,13 @@ import matplotlib.font_manager as fm
 import numpy as np
 import urllib.request
 import urllib.error
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from file_processing import (
     ALLOWED_EXTENSIONS,
     allowed_file,
     df_summary,
+    extract_hard_numbers_by_sheet,
     extract_hard_numbers_from_bytes,
     read_file,
 )
@@ -40,6 +42,13 @@ DEEPSEEK_API_URL = os.environ.get("DEEPSEEK_API_URL", "https://api.deepseek.com/
 DEEPSEEK_THINKING = os.environ.get("DEEPSEEK_THINKING", "").lower() in ("1", "true", "yes")
 # 思考模式用 deepseek-reasoner，普通模式用 deepseek-chat
 DEEPSEEK_MODEL = "deepseek-reasoner" if DEEPSEEK_THINKING else "deepseek-chat"
+
+# ── 多节点分布式配置 ──
+# DEEPANALYZE_NODES = "node1=http://192.168.1.10:5000,node2=http://192.168.1.11:5000"
+# 设置了该变量即为主节点模式：工作表任务轮流分发给加速节点，主节点只生成总览
+_NODE_LIST = os.environ.get("DEEPANALYZE_NODES", "").strip()
+_NODE_TIMEOUT = float(os.environ.get("DEEPANALYZE_NODE_TIMEOUT", "600"))
+_SHEET_MAX_TOKENS = 8192  # 每个工作表任务的最大输出 token 数
 
 if DEBUG_MODE:
     print("=" * 60)
@@ -577,71 +586,80 @@ def _generate_charts_from_json(model_output):
     fp_m = _get_font_prop(size=14)
     fp_sm = _get_font_prop(size=10)
 
-    # 提取 ```chartjson ... ``` 块
-    match = _re.search(r'```chartjson\s*\n(.*?)\n```', model_output, _re.DOTALL)
-    if not match:
+    # 提取全部 ```chartjson ... ``` 块（分布式模式下每个分项各有一个）
+    matches = list(_re.finditer(r'```chartjson\s*\n(.*?)\n```', model_output, _re.DOTALL))
+    if not matches:
         return charts
 
-    try:
-        chart_specs = json.loads(match.group(1))
-    except json.JSONDecodeError:
-        print("[图表] chartjson 解析失败，回退到自动图表")
-        return charts
-
-    if not isinstance(chart_specs, list):
-        return charts
-
-    for spec in chart_specs:
+    for match in matches:
         try:
-            title = spec.get("title", "图表")
-            ctype = spec.get("type", "bar")
-            data = spec.get("data", {})
-            if not data or not isinstance(data, dict):
-                continue
-
-            labels = list(data.keys())
-            values = list(data.values())
-
-            fig, ax = plt.subplots(figsize=(9, 4.5))
-
-            if ctype == "pie":
-                colors = plt.cm.Set3(range(len(labels)))
-                wedges, texts, autotexts = ax.pie(
-                    values, labels=labels, autopct='%1.1f%%',
-                    colors=colors, startangle=90,
-                    textprops={'fontproperties': fp_sm}
-                )
-                ax.set_title(title, fontproperties=fp_m, fontweight="bold")
-            elif ctype == "bar_h":
-                # 水平柱状图
-                colors = plt.cm.Blues(np.linspace(0.4, 0.9, len(labels)))
-                bars = ax.barh(range(len(labels)), values, color=colors, edgecolor="white")
-                ax.set_yticks(range(len(labels)))
-                ax.set_yticklabels(labels, fontproperties=fp_sm)
-                ax.invert_yaxis()
-                ax.set_title(title, fontproperties=fp_m, fontweight="bold")
-                for bar, val in zip(bars, values):
-                    ax.text(bar.get_width() + max(values) * 0.01, bar.get_y() + bar.get_height() / 2,
-                            str(val), ha="left", va="center", fontproperties=fp_sm)
-            else:
-                # 默认竖柱状图
-                colors = plt.cm.Blues(np.linspace(0.4, 0.9, len(labels)))
-                bars = ax.bar(range(len(labels)), values, color=colors, edgecolor="white")
-                ax.set_xticks(range(len(labels)))
-                ax.set_xticklabels(labels, rotation=25, ha="right", fontproperties=fp_sm)
-                ax.set_title(title, fontproperties=fp_m, fontweight="bold")
-                ax.grid(axis="y", alpha=0.3)
-                for bar, val in zip(bars, values):
-                    ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + max(values) * 0.01,
-                            str(val), ha="center", va="bottom", fontproperties=fp_sm, fontsize=9)
-
-            fig.tight_layout()
-            charts.append((title, _fig_to_base64(fig)))
-        except Exception as e:
-            print(f"[图表] 生成失败 ({title}): {e}")
+            chart_specs = json.loads(match.group(1))
+        except json.JSONDecodeError:
+            print("[图表] chartjson 解析失败，跳过该块")
             continue
 
+        if not isinstance(chart_specs, list):
+            continue
+
+        for spec in chart_specs:
+            try:
+                _render_chart_spec(spec, charts, fp_m, fp_sm)
+            except Exception as e:
+                print(f"[图表] 生成失败: {e}")
+                continue
+
     return charts
+
+
+def _render_chart_spec(spec, charts, fp_m, fp_sm):
+    """按单个 chartjson spec 生成图表并追加到 charts。"""
+    try:
+        title = spec.get("title", "图表")
+        ctype = spec.get("type", "bar")
+        data = spec.get("data", {})
+        if not data or not isinstance(data, dict):
+            return
+
+        labels = list(data.keys())
+        values = list(data.values())
+
+        fig, ax = plt.subplots(figsize=(9, 4.5))
+
+        if ctype == "pie":
+            colors = plt.cm.Set3(range(len(labels)))
+            wedges, texts, autotexts = ax.pie(
+                values, labels=labels, autopct='%1.1f%%',
+                colors=colors, startangle=90,
+                textprops={'fontproperties': fp_sm}
+            )
+            ax.set_title(title, fontproperties=fp_m, fontweight="bold")
+        elif ctype == "bar_h":
+            # 水平柱状图
+            colors = plt.cm.Blues(np.linspace(0.4, 0.9, len(labels)))
+            bars = ax.barh(range(len(labels)), values, color=colors, edgecolor="white")
+            ax.set_yticks(range(len(labels)))
+            ax.set_yticklabels(labels, fontproperties=fp_sm)
+            ax.invert_yaxis()
+            ax.set_title(title, fontproperties=fp_m, fontweight="bold")
+            for bar, val in zip(bars, values):
+                ax.text(bar.get_width() + max(values) * 0.01, bar.get_y() + bar.get_height() / 2,
+                        str(val), ha="left", va="center", fontproperties=fp_sm)
+        else:
+            # 默认竖柱状图
+            colors = plt.cm.Blues(np.linspace(0.4, 0.9, len(labels)))
+            bars = ax.bar(range(len(labels)), values, color=colors, edgecolor="white")
+            ax.set_xticks(range(len(labels)))
+            ax.set_xticklabels(labels, rotation=25, ha="right", fontproperties=fp_sm)
+            ax.set_title(title, fontproperties=fp_m, fontweight="bold")
+            ax.grid(axis="y", alpha=0.3)
+            for bar, val in zip(bars, values):
+                ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + max(values) * 0.01,
+                        str(val), ha="center", va="bottom", fontproperties=fp_sm, fontsize=9)
+
+        fig.tight_layout()
+        charts.append((title, _fig_to_base64(fig)))
+    except Exception as e:
+        print(f"[图表] 生成失败 ({title}): {e}")
 
 
 def _generate_charts(df, prefix=""):
@@ -948,6 +966,104 @@ def _call_deepseek_api_stream(prompt, max_tokens=16384, extra_body=None):
     print(f"[DeepSeek API] 流式推理完成 — {think_count} 个思考块, {chunk_count} 个文本块")
 
 
+def _run_inference(prompt, max_tokens=16384, stream=False):
+    """统一推理入口，覆盖三种后端（DeepSeek API / GGUF / HF）。
+
+    stream=False: 返回分析文本字符串。
+    stream=True: 返回生成器，产出 ("think"|"text", chunk) 元组。
+    """
+    if DEBUG_MODE:
+        if stream:
+            return _call_deepseek_api_stream(prompt, max_tokens=max_tokens)
+        return _call_deepseek_api(prompt, max_tokens=max_tokens)
+
+    model, tokenizer = get_model_and_tokenizer()
+
+    if MODEL_TYPE == "gguf":
+        if isinstance(model, str) and model.startswith("llama-server:"):
+            # 外部 llama-server → 走 API 路径（max_tokens 对齐本地模型）
+            if stream:
+                return _call_deepseek_api_stream(prompt, max_tokens=65536)
+            return _call_deepseek_api(prompt, max_tokens=65536)
+
+        # ── 内嵌 llama-cpp-python ──
+        def _gguf_llama_stream():
+            for chunk in model.create_chat_completion(
+                messages=[
+                    {"role": "system", "content": "你是财务分析师。逐表深度分析，每个表输出150字以上。引用预计算汇总中的具体数字。不要概括，要详细。"},
+                    {"role": "user", "content": prompt},
+                ],
+                max_tokens=65536, temperature=0.7, top_p=0.9,
+                stream=True):
+                delta = chunk["choices"][0].get("delta", {})
+                text = delta.get("content", "")
+                if text:
+                    yield ("text", text)
+        if stream:
+            return _gguf_llama_stream()
+        try:
+            result = model.create_chat_completion(
+                messages=[
+                    {"role": "system", "content": "直接输出分析报告，用 Markdown。"},
+                    {"role": "user", "content": prompt},
+                ],
+                max_tokens=65536, temperature=0.7, top_p=0.9)
+            output = result["choices"][0]["message"]["content"].strip()
+        except Exception as e:
+            raise RuntimeError(f"GGUF 推理出错: {str(e)}")
+        if not output or not output.strip():
+            output = "（模型未生成有效回复，请重试）"
+        return output
+
+    # ── HuggingFace 模型推理 (transformers) ──
+    try:
+        if stream:
+            messages = [{"role": "user", "content": prompt}]
+            formatted = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+            inputs = tokenizer(formatted, return_tensors="pt", truncation=True, max_length=8192).to(model.device)
+
+            streamer = TextIteratorStreamer(tokenizer, skip_prompt=True, skip_special_tokens=True)
+            gen_kwargs = dict(
+                **inputs,
+                max_new_tokens=4096,
+                temperature=0.7,
+                top_p=0.9,
+                do_sample=True,
+                pad_token_id=tokenizer.pad_token_id or tokenizer.eos_token_id,
+                streamer=streamer,
+            )
+            thread = Thread(target=model.generate, kwargs=gen_kwargs)
+            thread.start()
+
+            def _hf_stream():
+                for token_text in streamer:
+                    yield ("text", token_text)
+                thread.join()
+                del inputs
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            return _hf_stream()
+
+        messages = [{"role": "user", "content": prompt}]
+        formatted_prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        inputs = tokenizer(formatted_prompt, return_tensors="pt", truncation=True, max_length=8192).to(model.device)
+        with torch.no_grad():
+            outputs = model.generate(**inputs, max_new_tokens=4096, temperature=0.7, top_p=0.9,
+                                     do_sample=True, pad_token_id=tokenizer.pad_token_id or tokenizer.eos_token_id)
+        gen_ids = outputs[0][inputs["input_ids"].shape[1]:]
+        model_output = tokenizer.decode(gen_ids, skip_special_tokens=True)
+        del inputs, outputs
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        if not model_output or not model_output.strip():
+            model_output = "（模型未生成有效回复，请重试）"
+        return model_output
+    except torch.cuda.OutOfMemoryError:
+        raise RuntimeError("CUDA 显存不足。请尝试减少文件数据量。")
+    except Exception as e:
+        raise RuntimeError(f"模型推理出错: {str(e)}")
+
+
 def _prepare_analysis_input(valid_files, question):
     """准备分析所需的 prompt 和数据框（供 /analyze 和 /analyze/stream 共用）。"""
     import traceback
@@ -1174,6 +1290,348 @@ def _prepare_analysis_input_impl(valid_files, question):
     }
 
 
+# ══════════════════════════════════════════════════════════════
+# 多节点分布式分析
+# 主节点（设置了 DEEPANALYZE_NODES）把各工作表任务轮流分发给加速节点，
+# 各节点的 AI 分别完成分项分析，最后由主节点的 AI 生成总览，拼成完整报告。
+# ══════════════════════════════════════════════════════════════
+
+def _distributed_nodes():
+    """解析 DEEPANALYZE_NODES，返回 [{"name", "url"}]；未设置返回 []（单节点模式）。"""
+    nodes = []
+    for i, entry in enumerate(_NODE_LIST.split(",")):
+        entry = entry.strip()
+        if not entry:
+            continue
+        if "=" in entry:
+            name, url = entry.split("=", 1)
+            nodes.append({"name": name.strip(), "url": url.strip().rstrip("/")})
+        else:
+            nodes.append({"name": f"node{i+1}", "url": entry.rstrip("/")})
+    return nodes
+
+
+def _build_sheet_prompt(label, summary, hard, question):
+    """构建单个工作表的分项分析 prompt。"""
+    parts = [
+        f"你是一位资深的企业经营数据分析师。下面是经营数据文件中的工作表「{label}」的完整数据摘要，"
+        "请对用户提出的问题进行深入、全面的分析。",
+        "",
+        "⚠️ 以下【硬数字】为从 Excel 中精确提取的数值，绝对正确，禁止修改，必须原样引用。"
+        "每个数字都标注了期别标签（如 2026上半年=7400），使用前请核对期别。",
+        "",
+    ]
+    if hard:
+        parts += [
+            "=== ❌硬数字-禁止编造-必须引用 ===",
+            "⚠️ 以下数值从Excel精确提取，绝对正确，必须原样引用，禁止修改。",
+            "⚠️ 每个标签标注了期别（如2026H1=当前报告期），请使用对应[当前报告期]的值。",
+            hard,
+            "=== 结束 ===",
+            "",
+        ]
+    parts.append(f"数据规模: {summary['num_rows']} 行 × {summary['num_cols']} 列")
+    if summary.get("sheet_overview"):
+        parts.append(summary["sheet_overview"])
+    parts.append("")
+    if summary.get("per_sheet_summary"):
+        parts += ["--- 预计算汇总 ---", summary["per_sheet_summary"], ""]
+    # 有硬数字时不传行级样本，防模型读 raw data 编造
+    if not hard:
+        parts += [
+            "--- 头部数据 ---", summary["head_str"], "",
+            "--- 尾部数据 ---", summary["tail_str"], "",
+            "--- 文本列值分布 ---", summary["dimensions_str"], "",
+            "--- 缺失值 ---", summary["missing_str"], "",
+        ]
+    parts += [
+        f"=== 用户问题 ===\n{question}",
+        "",
+        "=== 分析要求（强制执行） ===",
+        "1. 以本工作表为分析单元，逐板块拆分并独立深挖，每个板块一个 ## 标题，不允许合并或一笔带过。",
+        "2. 每个板块必须包含：数据概览表、关键指标对比表、变化分析（变动 >30% 标注预警）、业务解读、策略建议、风险提示。",
+        "3. 每条发现必须引用至少 2 个具体数值（硬数字优先），禁止“某些指标”“部分数据”等模糊表述。",
+        "4. 数据只有一期时只列一期，严禁编造多期对比；禁止将同一组数字复制粘贴到多个期别列。",
+        "5. 硬数字必须原样引用，禁止修改或换算。",
+        "6. 输出使用 Markdown，标题以 ## 开头，重点数字加粗。",
+        "7. 分析正文之后输出【图表数据】区块，每个分析模块至少一张图表，数据必须来自硬数字，禁止编造，格式：",
+        "```chartjson",
+        '[{"title": "图表标题", "type": "bar/pie/line/bar_h", "data": {"指标1": 数值, "指标2": 数值}}]',
+        "```",
+    ]
+    return "\n".join(parts)
+
+
+def _truncate_text(text, limit=3000):
+    """按行截断长文本，避免总览 prompt 超长。"""
+    text = text.strip()
+    if len(text) <= limit:
+        return text
+    return text[:limit].rsplit("\n", 1)[0] + "\n（该分项分析较长，已截断）"
+
+
+def _build_overview_prompt(question, sections):
+    """构建主节点总览部分的 prompt。sections: [(label, node_name, text)]"""
+    parts = [
+        "你是一位资深的企业经营数据分析师。以下是对同一批经营数据按工作表拆分、由多个节点分别完成的分项分析结果。",
+        "请基于这些分项分析结果，生成整份报告的【总览与综合结论】部分。",
+        "",
+        f"=== 用户问题 ===\n{question}",
+        "",
+        "=== 各分项分析结果 ===",
+    ]
+    for label, node, text in sections:
+        parts.append(f"### {label}（节点：{node}）\n{_truncate_text(text)}")
+    parts += [
+        "",
+        "=== 总览部分要求（强制执行） ===",
+        "1. 跨板块综合分析：各工作表之间的联动关系、整体经营画像、资源错配检测、前瞻预测。",
+        "2. 总评与行动纲领：经营健康度评分（优秀/良好/关注/预警）、TOP 3 亮点、TOP 3 风险、5 项最紧迫工作（按优先级排序，每项标明负责板块）。",
+        "3. 需求对照表：| 用户要求 | 对应报告章节 | 数据支撑情况 |，逐条对照用户问题中的每项要求，不允许遗漏。",
+        "4. 引用具体数值时必须与分项分析一致，禁止编造；数据无法支撑的维度要明确说明数据局限。",
+        "5. 输出使用 Markdown，标题以 ## 开头，重点数字加粗。",
+        "6. 末尾输出【图表数据】区块，展示总览关键对比，数据必须来自上述分项分析，禁止编造，格式：",
+        "```chartjson",
+        '[{"title": "图表标题", "type": "bar/pie/line/bar_h", "data": {"指标1": 数值, "指标2": 数值}}]',
+        "```",
+    ]
+    return "\n".join(parts)
+
+
+def _call_node_sheet(url, prompt, max_tokens=_SHEET_MAX_TOKENS, timeout=_NODE_TIMEOUT):
+    """调用加速节点的 /analyze/sheet 端点，返回分析文本。"""
+    body = json.dumps({"prompt": prompt, "max_tokens": max_tokens}).encode("utf-8")
+    req = urllib.request.Request(
+        url + "/analyze/sheet",
+        data=body,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        eb = e.read().decode("utf-8") if e.fp else ""
+        raise RuntimeError(f"节点 {url} 返回错误 ({e.code}): {eb[:200]}")
+    except Exception as e:
+        raise RuntimeError(f"节点 {url} 请求失败: {str(e)}")
+    if data.get("error"):
+        raise RuntimeError(str(data["error"]))
+    return data.get("result", "")
+
+
+def _prepare_distributed_input(valid_files, question):
+    """为分布式模式准备任务列表：按工作表拆分 summary 与硬数字。
+
+    Returns:
+        {filenames, total_rows, total_cols, dataframes, tasks: [{label, prompt}]}
+    """
+    import traceback
+    try:
+        return _prepare_distributed_input_impl(valid_files, question)
+    except Exception:
+        print(f"[_prepare_distributed ERROR] {traceback.format_exc()}")
+        raise
+
+
+def _prepare_distributed_input_impl(valid_files, question):
+    from werkzeug.datastructures import FileStorage as _FS
+
+    total_rows = 0
+    total_cols = 0
+    filenames = []
+    dataframes = []
+
+    # 先保存文件原始数据（FileStorage 流只能读一次）
+    file_buffers = []
+    fresh_files = []
+    for f in valid_files:
+        buf = io.BytesIO()
+        f.save(buf)
+        data = buf.getvalue()
+        file_buffers.append((f.filename, data))
+        fresh_files.append(_FS(stream=io.BytesIO(data), filename=f.filename))
+
+    tasks = []
+    for f in fresh_files:
+        filename, suffix, df = read_file(f)
+        filenames.append(filename)
+        dataframes.append((filename, df))
+        total_rows += len(df)
+        total_cols += len(df.columns)
+
+        # 每个工作表自己的硬数字
+        hard_by_sheet = {}
+        try:
+            file_bytes = dict(file_buffers)[filename]
+            hard_by_sheet = extract_hard_numbers_by_sheet(io.BytesIO(file_bytes))
+        except Exception as e:
+            print(f"[硬数字] {filename} 提取失败: {e}")
+
+        if "_sheet" in df.columns:
+            for sname in df["_sheet"].unique():
+                sheet_df = df[df["_sheet"] == sname]
+                summary = df_summary(filename, sheet_df)
+                hard = hard_by_sheet.get(sname, "")
+                label = f"{filename}·{sname}"
+                tasks.append({"label": label, "prompt": _build_sheet_prompt(label, summary, hard, question)})
+        else:
+            # CSV/PDF 等无 sheet 划分的文件，整体作为一个任务
+            summary = df_summary(filename, df)
+            label = filename
+            tasks.append({"label": label, "prompt": _build_sheet_prompt(label, summary, "", question)})
+
+    if not tasks:
+        raise RuntimeError("未检测到可分发的工作表数据")
+
+    return {
+        "filenames": filenames,
+        "total_rows": total_rows,
+        "total_cols": total_cols,
+        "dataframes": dataframes,
+        "tasks": tasks,
+    }
+
+
+def _distributed_analysis_events(prep, question, output_parts):
+    """分布式流式分析：并行分发工作表任务 → 逐个产出小节 → 主节点生成总览。
+
+    yield ("think"|"text", chunk)，并把所有文本块累计进 output_parts 供图表提取。
+    """
+    nodes = _distributed_nodes()
+    tasks = prep["tasks"]
+    print(f"[分布式] {len(tasks)} 个工作表任务，分发给 {len(nodes)} 个节点")
+    sections = []
+    failures = 0
+
+    with ThreadPoolExecutor(max_workers=len(nodes)) as ex:
+        fut_map = {}
+        for i, t in enumerate(tasks):
+            node = nodes[i % len(nodes)]
+            fut = ex.submit(_call_node_sheet, node["url"], t["prompt"])
+            fut_map[fut] = (t, node)
+
+        for fut in as_completed(fut_map):
+            t, node = fut_map[fut]
+            try:
+                section = fut.result().strip()
+            except Exception as e:
+                failures += 1
+                block = f"\n\n### 工作表「{t['label']}」分析（节点：{node['name']}）\n\n⚠️ 该任务分析失败：{str(e)}\n"
+                output_parts.append(block)
+                yield ("text", block)
+                continue
+            if not section:
+                section = "（节点未返回有效分析内容）"
+            sections.append((t["label"], node["name"], section))
+            block = f"\n\n### 工作表「{t['label']}」分析（节点：{node['name']}）\n\n{section}\n"
+            output_parts.append(block)
+            yield ("text", block)
+
+    # ── 主节点生成总览 ──
+    intro = "\n\n---\n\n## 总览与综合结论（主节点生成）\n\n"
+    output_parts.append(intro)
+    yield ("text", intro)
+    for evt, chunk in _run_inference(_build_overview_prompt(question, sections), max_tokens=16384, stream=True):
+        if evt == "think":
+            yield ("think", chunk)
+        else:
+            output_parts.append(chunk)
+            yield ("text", chunk)
+
+    if failures:
+        note = f"\n\n⚠️ 共有 {failures} 个工作表任务失败，详细原因见对应小节。\n"
+        output_parts.append(note)
+        yield ("text", note)
+
+
+def _perform_analysis_distributed(prep, question):
+    """非流式分布式分析：并行分发 → 收集 → 主节点总览 → 拼装完整报告。"""
+    nodes = _distributed_nodes()
+    tasks = prep["tasks"]
+    print(f"[分布式] {len(tasks)} 个工作表任务，分发给 {len(nodes)} 个节点")
+    sections = []
+    failures = 0
+
+    with ThreadPoolExecutor(max_workers=len(nodes)) as ex:
+        fut_map = {}
+        for i, t in enumerate(tasks):
+            node = nodes[i % len(nodes)]
+            fut = ex.submit(_call_node_sheet, node["url"], t["prompt"])
+            fut_map[fut] = (t, node)
+        for fut in as_completed(fut_map):
+            t, node = fut_map[fut]
+            try:
+                section = fut.result().strip()
+            except Exception as e:
+                failures += 1
+                sections.append((t["label"], node["name"], f"（该任务分析失败：{str(e)}）"))
+                continue
+            if not section:
+                section = "（节点未返回有效分析内容）"
+            sections.append((t["label"], node["name"], section))
+
+    overview = _run_inference(_build_overview_prompt(question, sections))
+
+    body_parts = []
+    for label, node, section in sections:
+        body_parts.append(f"### 工作表「{label}」分析（节点：{node}）\n\n{section}\n")
+    body_parts.append(f"## 总览与综合结论（主节点生成）\n\n{overview.strip()}\n")
+    if failures:
+        body_parts.append(f"⚠️ 共有 {failures} 个工作表任务失败，详细原因见对应小节。\n")
+    full = "\n".join(body_parts)
+
+    all_charts = _generate_charts_from_json(full)
+    if not all_charts:
+        for fname, df in prep["dataframes"]:
+            prefix = fname if len(prep["dataframes"]) > 1 else ""
+            try:
+                all_charts.extend(_generate_charts(df, prefix=prefix))
+            except Exception as e:
+                print(f"[图表] {fname} 图表生成失败: {e}")
+
+    report_lines = [
+        "=" * 60,
+        "DeepAnalyze 数据分析报告（分布式）",
+        "=" * 60,
+        "",
+        f"分析文件 ({len(prep['filenames'])} 个): {', '.join(prep['filenames'])}",
+        f"分析问题: {question}",
+        f"数据总量: {prep['total_rows']} 行 × {prep['total_cols']} 列",
+        f"节点数: {len(nodes)} 个（{', '.join(n['name'] for n in nodes)}），工作表任务数: {len(tasks)}",
+        "",
+        "-" * 40,
+        "AI 分析正文",
+        "-" * 40,
+        "",
+        full,
+        "",
+        "-" * 40,
+        "报告生成完毕",
+        "-" * 40,
+    ]
+    return {"result": "\n".join(report_lines), "images": all_charts}
+
+
+@app.route("/analyze/sheet", methods=["POST"])
+def analyze_sheet():
+    """加速节点的工作表分析端点：接收 {"prompt", "max_tokens"}，返回 {"result": 分析文本}。"""
+    data = request.get_json(force=True, silent=True) or {}
+    prompt = (data.get("prompt") or "").strip()
+    if not prompt:
+        return jsonify({"error": "缺少 prompt"}), 400
+    try:
+        max_tokens = int(data.get("max_tokens", _SHEET_MAX_TOKENS))
+    except (TypeError, ValueError):
+        max_tokens = _SHEET_MAX_TOKENS
+    try:
+        result = _run_inference(prompt, max_tokens=max_tokens)
+        return jsonify({"result": result})
+    except Exception as e:
+        print(f"[节点任务错误] {e}")
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/analyze/stream", methods=["POST"])
 def analyze_stream():
     """流式分析接口 — SSE 逐字推送模型输出。"""
@@ -1197,9 +1655,13 @@ def analyze_stream():
     if not question:
         return jsonify({"error": "分析问题不能为空"}), 400
 
-    # 2. 准备分析输入
+    # 2. 准备分析输入（分布式模式按工作表拆分任务）
+    distributed = bool(_distributed_nodes())
     try:
-        prep = _prepare_analysis_input(valid_files, question)
+        if distributed:
+            prep = _prepare_distributed_input(valid_files, question)
+        else:
+            prep = _prepare_analysis_input(valid_files, question)
     except Exception as e:
         return jsonify({"error": f"数据准备失败: {str(e)}"}), 500
 
@@ -1223,67 +1685,20 @@ def analyze_stream():
             ])
             yield f"data: {json.dumps({'type': 'text', 'content': header}, ensure_ascii=False)}\n\n"
 
-            # 流式推理
-            if DEBUG_MODE:
-                for evt_type, chunk in _call_deepseek_api_stream(prep["prompt"]):
+            # 流式推理（分布式：并行分发工作表任务 + 主节点总览）
+            if distributed:
+                for evt_type, chunk in _distributed_analysis_events(prep, question, model_output_parts):
+                    if evt_type == "think":
+                        yield f"data: {json.dumps({'type': 'think', 'content': chunk}, ensure_ascii=False)}\n\n"
+                    else:
+                        yield f"data: {json.dumps({'type': 'text', 'content': chunk}, ensure_ascii=False)}\n\n"
+            else:
+                for evt_type, chunk in _run_inference(prep["prompt"], stream=True):
                     if evt_type == "think":
                         yield f"data: {json.dumps({'type': 'think', 'content': chunk}, ensure_ascii=False)}\n\n"
                     else:
                         model_output_parts.append(chunk)
                         yield f"data: {json.dumps({'type': 'text', 'content': chunk}, ensure_ascii=False)}\n\n"
-            elif MODEL_TYPE == "gguf":
-                model, _ = get_model_and_tokenizer()
-                if isinstance(model, str) and model.startswith("llama-server:"):
-                    # 外部 llama-server → 走 API 流式（max_tokens 对齐本地模型）
-                    for evt_type, chunk in _call_deepseek_api_stream(prep["prompt"], max_tokens=65536):
-                        if evt_type == "think":
-                            yield f"data: {json.dumps({'type': 'think', 'content': chunk}, ensure_ascii=False)}\n\n"
-                        else:
-                            model_output_parts.append(chunk)
-                            yield f"data: {json.dumps({'type': 'text', 'content': chunk}, ensure_ascii=False)}\n\n"
-                else:
-                    # 内嵌 llama-cpp-python
-                    for chunk in model.create_chat_completion(
-                        messages=[
-                            {"role": "system", "content": "你是财务分析师。逐表深度分析，每个表输出150字以上。引用预计算汇总中的具体数字。不要概括，要详细。"},
-                            {"role": "user", "content": prep["prompt"]},
-                        ],
-                        max_tokens=65536, temperature=0.7, top_p=0.9,
-                        stream=True):
-                        delta = chunk["choices"][0].get("delta", {})
-                        text = delta.get("content", "")
-                        if text:
-                            model_output_parts.append(text)
-                            yield f"data: {json.dumps({'type': 'text', 'content': text}, ensure_ascii=False)}\n\n"
-            else:
-                # HF 模型：TextIteratorStreamer 逐 token 流式
-                model, tokenizer = get_model_and_tokenizer()
-                messages = [{"role": "user", "content": prep["prompt"]}]
-                formatted = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-                inputs = tokenizer(formatted, return_tensors="pt", truncation=True, max_length=8192).to(model.device)
-
-                streamer = TextIteratorStreamer(tokenizer, skip_prompt=True, skip_special_tokens=True)
-                gen_kwargs = dict(
-                    **inputs,
-                    max_new_tokens=4096,
-                    temperature=0.7,
-                    top_p=0.9,
-                    do_sample=True,
-                    pad_token_id=tokenizer.pad_token_id or tokenizer.eos_token_id,
-                    streamer=streamer,
-                )
-
-                thread = Thread(target=model.generate, kwargs=gen_kwargs)
-                thread.start()
-
-                for token_text in streamer:
-                    model_output_parts.append(token_text)
-                    yield f"data: {json.dumps({'type': 'text', 'content': token_text}, ensure_ascii=False)}\n\n"
-
-                thread.join()
-                del inputs
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
 
             full_output = "".join(model_output_parts)
             if not full_output or not full_output.strip():
@@ -1330,53 +1745,16 @@ def perform_analysis(files, question):
     Returns:
         {"result": 文本报告, "images": [(标题, base64), ...]}
     """
+    # 分布式模式：按工作表分发到加速节点，主节点生成总览
+    if _distributed_nodes():
+        prep = _prepare_distributed_input(files, question)
+        return _perform_analysis_distributed(prep, question)
+
     prep = _prepare_analysis_input(files, question)
     prompt = prep["prompt"]
 
     # ── 调用模型推理 ──
-    if DEBUG_MODE:
-        print("[调试模式] 使用 DeepSeek API 进行推理...")
-        model_output = _call_deepseek_api(prompt)
-    elif MODEL_TYPE == "gguf":
-        model, _ = get_model_and_tokenizer()
-        if isinstance(model, str) and model.startswith("llama-server:"):
-            # 外部 llama-server → API（max_tokens 对齐本地模型）
-            model_output = _call_deepseek_api(prompt, max_tokens=65536)
-        else:
-            # 内嵌 llama-cpp-python
-            try:
-                result = model.create_chat_completion(
-                    messages=[
-                        {"role": "system", "content": "直接输出分析报告，用 Markdown。"},
-                        {"role": "user", "content": prompt},
-                    ],
-                    max_tokens=65536, temperature=0.7, top_p=0.9)
-                model_output = result["choices"][0]["message"]["content"].strip()
-            except Exception as e:
-                raise RuntimeError(f"GGUF 推理出错: {str(e)}")
-        if not model_output or not model_output.strip():
-            model_output = "（模型未生成有效回复，请重试）"
-    else:
-        # HF 模型推理 (transformers)
-        try:
-            model, tokenizer = get_model_and_tokenizer()
-            messages = [{"role": "user", "content": prompt}]
-            formatted_prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-            inputs = tokenizer(formatted_prompt, return_tensors="pt", truncation=True, max_length=8192).to(model.device)
-            with torch.no_grad():
-                outputs = model.generate(**inputs, max_new_tokens=4096, temperature=0.7, top_p=0.9,
-                                         do_sample=True, pad_token_id=tokenizer.pad_token_id or tokenizer.eos_token_id)
-            gen_ids = outputs[0][inputs["input_ids"].shape[1]:]
-            model_output = tokenizer.decode(gen_ids, skip_special_tokens=True)
-            del inputs, outputs
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-            if not model_output or not model_output.strip():
-                model_output = "（模型未生成有效回复，请重试）"
-        except torch.cuda.OutOfMemoryError:
-            raise RuntimeError("CUDA 显存不足。请尝试减少文件数据量。")
-        except Exception as e:
-            raise RuntimeError(f"模型推理出错: {str(e)}")
+    model_output = _run_inference(prompt)
 
     # ── 生成图表：优先 AI 指定，回退自动 ──
     all_charts = _generate_charts_from_json(model_output)

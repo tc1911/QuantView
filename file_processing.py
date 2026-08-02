@@ -8,6 +8,7 @@
 
 import io
 import os
+import re
 import traceback
 
 import pandas as pd
@@ -282,6 +283,29 @@ def extract_hard_numbers_from_bytes(file_buffers):
         except Exception:
             pass
     return hard_nums
+
+
+def extract_hard_numbers_by_sheet(stream):
+    """按工作表拆分硬数字，返回 {工作表名: 硬数字文本}。
+
+    复用 extract_hard_numbers_core 的输出（每段以【工作表名】开头），
+    按行解析分组。供分布式逐表分析使用。
+    """
+    result = {}
+    current = None
+    parts = []
+    for line in "\n".join(extract_hard_numbers_core(stream)).splitlines():
+        m = re.match(r"^【(.+)】$", line.strip())
+        if m:
+            if current is not None and parts:
+                result[current] = "\n".join(parts)
+            current = m.group(1)
+            parts = [line]
+        elif current is not None:
+            parts.append(line)
+    if current is not None and parts:
+        result[current] = "\n".join(parts)
+    return result
 
 
 def extract_hard_numbers_core(stream):
