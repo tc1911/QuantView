@@ -13,6 +13,8 @@ rem  主节点 DEEPANALYZE_NODES 配置多个节点即可并行分发：
 rem    node1=http://IP:5001,node2=http://IP:5002
 rem ════════════════════════════════════════════════════════════
 set DEEPANALYZE_HEADLESS=true
+rem 加速节点任务 prompt 短，32768 上下文足够，省一半 KV 缓存内存
+set DEEPANALYZE_CONTEXT=32768
 if not "%1"=="" (
     set DEEPANALYZE_PORT=%1
 ) else (

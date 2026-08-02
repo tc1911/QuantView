@@ -57,6 +57,9 @@ _SHEET_MAX_TOKENS = 8192  # 每个工作表任务的最大输出 token 数
 # 本地模型思考模式开关（默认关：Qwen3 思考会泄漏进正文/拖慢输出；
 # 想开启时设 DEEPANALYZE_LOCAL_THINKING=true，前端会把 <think> 块折叠展示）
 _ENABLE_LOCAL_THINKING = os.environ.get("DEEPANALYZE_LOCAL_THINKING", "").lower() in ("1", "true", "yes")
+# 上下文长度（默认 65536）。同机多实例时建议加速节点调小（如 32768）省内存：
+# 32B 模型 64K 上下文 KV 缓存约 16GB，双实例会很紧
+_CONTEXT = int(os.environ.get("DEEPANALYZE_CONTEXT", "65536"))
 _LOCAL_SERVER_BODY = {
     "chat_template_kwargs": {"enable_thinking": _ENABLE_LOCAL_THINKING},
     "repeat_penalty": 1.15,
@@ -440,7 +443,7 @@ def get_model_and_tokenizer():
 
             _llama_proc = subprocess.Popen(
                 [server_bin, "-m", MODEL_PATH, "--port", str(port),
-                 "-ngl", "99", "-c", "65536", "--host", "127.0.0.1",
+                 "-ngl", "99", "-c", str(_CONTEXT), "--host", "127.0.0.1",
                  # 服务端禁用 Qwen3 思考模式（请求级 chat_template_kwargs 对部分模型无效）
                  "--chat-template-kwargs", '{"enable_thinking": %s}' % ("true" if _ENABLE_LOCAL_THINKING else "false")],
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
