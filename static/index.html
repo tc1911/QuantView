@@ -1271,6 +1271,13 @@ console.log('[DeepAnalyze] JS loaded');
                 fullText += chunk;
                 // Real-time update to active session
                 if (activeSid) { var cs = getSession(activeSid); if (cs && cs.status === 'running') { cs.outputText = fullText; cs.thinkText = thinkText; } }
+                // 节流持久化运行中会话（刷新后保留部分输出）
+                if (!window._persistTimer) {
+                  window._persistTimer = setTimeout(function () {
+                    window._persistTimer = null;
+                    persistSessions();
+                  }, 2000);
+                }
                 // Throttle rendering: batch updates every 150ms
                 if (!window._renderTimer) {
                   window._renderTimer = setTimeout(function () {
@@ -1325,6 +1332,7 @@ console.log('[DeepAnalyze] JS loaded');
               }
               // Flush pending render
               if (window._renderTimer) { clearTimeout(window._renderTimer); window._renderTimer = null; }
+              if (window._persistTimer) { clearTimeout(window._persistTimer); window._persistTimer = null; }
               (document.getElementById('streamOutput') || {}).innerHTML = renderMarkdown(fullText);
 
               // Save to session
@@ -1672,10 +1680,18 @@ console.log('[DeepAnalyze] JS loaded');
 
   // ── History management ──
   var SESSIONS_KEY = 'deepanalyze-sessions';
-  function persistSessions() { var ts = sessions.filter(function(s){return s.status==='done';}); try{localStorage.setItem(SESSIONS_KEY,JSON.stringify(ts.slice(0,50)));}catch(e){} }
+  // 运行中的会话也持久化（定时保存部分输出），刷新后恢复为"中断"状态
+  function persistSessions() { var ts = sessions.filter(function(s){return s.status==='done'||s.status==='running';}); try{localStorage.setItem(SESSIONS_KEY,JSON.stringify(ts.slice(0,50)));}catch(e){} }
 
   function loadPersisted() {
-    try { return JSON.parse(localStorage.getItem(SESSIONS_KEY)) || []; } catch (e) { return []; }
+    try {
+      var list = JSON.parse(localStorage.getItem(SESSIONS_KEY)) || [];
+      // 刷新前仍在运行的会话，其流已被页面关闭掐断 → 标记为中断
+      return list.map(function (s) {
+        if (s.status === 'running') { s.status = 'interrupted'; s.controller = null; }
+        return s;
+      });
+    } catch (e) { return []; }
   }
 
   function createSession(question, filenames, ctrl) {
@@ -1710,7 +1726,11 @@ console.log('[DeepAnalyze] JS loaded');
       loadingContainer.classList.remove('active');
       submitBtn.disabled = false; submitBtn.classList.remove('btn-stop');
       submitBtn.innerHTML = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg> 开始分析';
-      var fo = (s.thinkText ? '<think>' + s.thinkText + '</think>\n' : '') + s.outputText;
+      var notice = '';
+      if (s.status === 'interrupted') {
+        notice = '<div style="padding:10px 14px;margin-bottom:12px;border:1px solid var(--warning);border-radius:var(--radius);background:var(--bg);color:var(--warning);font-size:13px;">⚠️ 该分析在中断前未完成（页面刷新或停止导致），以下为中断时的部分输出，可重新发起分析。</div>';
+      }
+      var fo = notice + (s.thinkText ? '<think>' + s.thinkText + '</think>\n' : '') + s.outputText;
       renderResult(fo);
       chartsContainer.innerHTML = '';
       (s.images || []).forEach(function (img) {
@@ -1732,9 +1752,11 @@ console.log('[DeepAnalyze] JS loaded');
     all.forEach(function (s) {
       var item = document.createElement('div'); item.className = 'history-item';
       if (s.id === activeSid) item.classList.add('selected');
-      var dot = s.status === 'running' ? '<span style="color:var(--primary);">● </span>' : '';
+      var dot = s.status === 'running' ? '<span style="color:var(--primary);">● </span>'
+        : (s.status === 'interrupted' ? '<span style="color:var(--warning);">◌ </span>' : '');
+      var tag = s.status === 'interrupted' ? ' · <span style="color:var(--warning);">中断</span>' : '';
       item.innerHTML = dot + '<div class="history-item-title">' + escHtml(s.question.substring(0, 35)) + '</div>' +
-        '<div class="history-item-meta">' + escHtml((s.files || []).join(', ').substring(0, 25)) + ' · ' + s.time + '</div>';
+        '<div class="history-item-meta">' + escHtml((s.files || []).join(', ').substring(0, 25)) + ' · ' + s.time + tag + '</div>';
       item.addEventListener('click', function () { switchToSession(s.id); });
       historyList.appendChild(item);
     });
