@@ -1391,6 +1391,21 @@ def _distributed_nodes():
     return nodes
 
 
+def _work_nodes():
+    """参与工作表分发的节点：主节点自身（url=None，本地推理）+ 加速节点列表。
+
+    避免主节点模型闲置——工作表任务在全部节点间轮流分配。
+    """
+    return [{"name": "主节点", "url": None}] + _distributed_nodes()
+
+
+def _submit_node_task(ex, node, prompt):
+    """按节点类型提交任务：主节点本地推理，加速节点走 HTTP。"""
+    if node["url"] is None:
+        return ex.submit(_run_inference, prompt, _SHEET_MAX_TOKENS)
+    return ex.submit(_call_node_sheet, node["url"], prompt)
+
+
 def _build_sheet_prompt(label, summary, hard, question):
     """构建单个工作表的分项分析 prompt。"""
     parts = [
@@ -1608,19 +1623,19 @@ def _distributed_analysis_events(prep, question, output_parts):
 
     yield ("think"|"text", chunk)，并把所有文本块累计进 output_parts 供图表提取。
     """
-    nodes = _distributed_nodes()
+    workers = _work_nodes()
     tasks = prep["tasks"]
-    print(f"[分布式] {len(tasks)} 个工作表任务，分发给 {len(nodes)} 个节点")
+    print(f"[分布式] {len(tasks)} 个工作表任务，分发给 {len(workers)} 个节点（含主节点自身）")
     sections = []
     failures = 0
     done = 0
     total = len(tasks)
 
-    with ThreadPoolExecutor(max_workers=len(nodes)) as ex:
+    with ThreadPoolExecutor(max_workers=len(workers)) as ex:
         fut_map = {}
         for i, t in enumerate(tasks):
-            node = nodes[i % len(nodes)]
-            fut = ex.submit(_call_node_sheet, node["url"], t["prompt"])
+            node = workers[i % len(workers)]
+            fut = _submit_node_task(ex, node, t["prompt"])
             fut_map[fut] = (t, node)
 
         for fut in as_completed(fut_map):
@@ -1663,17 +1678,17 @@ def _distributed_analysis_events(prep, question, output_parts):
 
 def _perform_analysis_distributed(prep, question):
     """非流式分布式分析：并行分发 → 收集 → 主节点总览 → 拼装完整报告。"""
-    nodes = _distributed_nodes()
+    workers = _work_nodes()
     tasks = prep["tasks"]
-    print(f"[分布式] {len(tasks)} 个工作表任务，分发给 {len(nodes)} 个节点")
+    print(f"[分布式] {len(tasks)} 个工作表任务，分发给 {len(workers)} 个节点（含主节点自身）")
     sections = []
     failures = 0
 
-    with ThreadPoolExecutor(max_workers=len(nodes)) as ex:
+    with ThreadPoolExecutor(max_workers=len(workers)) as ex:
         fut_map = {}
         for i, t in enumerate(tasks):
-            node = nodes[i % len(nodes)]
-            fut = ex.submit(_call_node_sheet, node["url"], t["prompt"])
+            node = workers[i % len(workers)]
+            fut = _submit_node_task(ex, node, t["prompt"])
             fut_map[fut] = (t, node)
         for fut in as_completed(fut_map):
             t, node = fut_map[fut]
@@ -1714,7 +1729,7 @@ def _perform_analysis_distributed(prep, question):
         f"分析文件 ({len(prep['filenames'])} 个): {', '.join(prep['filenames'])}",
         f"分析问题: {question}",
         f"数据总量: {prep['total_rows']} 行 × {prep['total_cols']} 列",
-        f"节点数: {len(nodes)} 个（{', '.join(n['name'] for n in nodes)}），工作表任务数: {len(tasks)}",
+        f"节点数: {len(workers)} 个（{', '.join(n['name'] for n in workers)}），工作表任务数: {len(tasks)}",
         "",
         "-" * 40,
         "AI 分析正文",
