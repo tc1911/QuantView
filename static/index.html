@@ -428,6 +428,29 @@
   .meta-pill.meta-distributed { background: #fef3c7; color: #b45309; }
   [data-theme="dark"] .meta-pill.meta-distributed { background: #3b2f10; color: #fbbf24; }
   .meta-progress { margin-left: auto; font-variant-numeric: tabular-nums; }
+  .meta-progress-wrap {
+    flex: 1;
+    min-width: 140px;
+    height: 6px;
+    border-radius: 999px;
+    background: var(--border);
+    overflow: hidden;
+  }
+  .meta-progress-bar {
+    height: 100%;
+    width: 0%;
+    border-radius: 999px;
+    background: var(--primary);
+    transition: width 0.3s ease;
+  }
+  .meta-progress-bar.indeterminate {
+    width: 35%;
+    animation: meta-progress-slide 1.2s ease-in-out infinite;
+  }
+  @keyframes meta-progress-slide {
+    0% { margin-left: -35%; }
+    100% { margin-left: 100%; }
+  }
 
   /* ── Think block (collapsible) ── */
   .think-block {
@@ -1306,9 +1329,15 @@ console.log('[DeepAnalyze] JS loaded');
 
               // Save to session
               if (activeSid) { var cur = getSession(activeSid); if (cur) { cur.thinkText = thinkText; cur.outputText = fullText; cur.images = imgData; cur.status = 'done'; cur.controller = null; cur.meta = currentMeta; persistSessions(); } }
+              var mbar = document.getElementById('metaProgressBar');
               if (lastProgress) {
                 var mp = document.getElementById('metaProgress');
                 if (mp) mp.textContent = '分项分析完成（' + lastProgress.done + '/' + lastProgress.total + '）';
+                if (mbar) mbar.style.width = '100%';
+              } else if (mbar) {
+                // 单节点模式：不定进度条收满
+                mbar.classList.remove('indeterminate');
+                mbar.style.width = '100%';
               }
               document.getElementById('streamStatus').textContent = '分析完成';
               renderResult(finalOut);
@@ -1331,6 +1360,7 @@ console.log('[DeepAnalyze] JS loaded');
         submitBtn.disabled = false;
         submitBtn.classList.remove('btn-stop');
         submitBtn.innerHTML = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg> 开始分析';
+        clearMetaBadge();
         return;
       }
       loadingContainer.classList.remove('active');
@@ -1616,9 +1646,12 @@ console.log('[DeepAnalyze] JS loaded');
       el.innerHTML =
         '<span class="meta-pill meta-distributed">分布式模式</span>' +
         '<span class="meta-nodes">' + escHtml((meta.nodes || []).join('、')) + '</span>' +
-        '<span class="meta-progress" id="metaProgress"></span>';
+        '<span class="meta-progress" id="metaProgress">分项分析 0/0</span>' +
+        '<div class="meta-progress-wrap"><div class="meta-progress-bar" id="metaProgressBar"></div></div>';
     } else {
-      el.innerHTML = '<span class="meta-pill meta-single">单节点模式</span>';
+      el.innerHTML =
+        '<span class="meta-pill meta-single">单节点模式</span>' +
+        '<div class="meta-progress-wrap"><div class="meta-progress-bar indeterminate" id="metaProgressBar"></div></div>';
     }
     el.classList.add('active');
   }
@@ -1626,6 +1659,8 @@ console.log('[DeepAnalyze] JS loaded');
   function updateMetaProgress(p) {
     var el = document.getElementById('metaProgress');
     if (el) el.textContent = '分项分析 ' + p.done + '/' + p.total;
+    var bar = document.getElementById('metaProgressBar');
+    if (bar) bar.style.width = Math.round(p.done / p.total * 100) + '%';
   }
 
   function clearMetaBadge() {
