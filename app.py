@@ -1283,6 +1283,8 @@ def _prepare_analysis_input_impl(valid_files, question):
 - 无历史期数据的指标不得计算变动率，只能陈述当期数值
 - 表格中的每个数值必须有硬数字出处（指标名+期别完全匹配），找不到出处的留空写"无数据"，禁止挪用其他指标行的数值充当历史期
 - 引用硬数字必须保留原始指标名（如净利率），禁止改写成硬数字中未出现的指标名（如毛利率）
+- 数据概览表只列核心指标（最多 8 行），禁止逐行或逐行号区间罗列，数据量大时用"共N行"概括
+- 整份报告（不含图表数据区块）控制在 6000 字以内，禁止枚举式、重复式输出
 - 禁止将同一组数字复制粘贴到多个期别列中
 - 每个板块的分析必须独立完整，读者可以只看一个板块而不需要参考其他部分
 - 报告末尾必须附上【需求对照表】，格式：| 用户要求 | 对应章节 | 数据支撑情况 |
@@ -1378,7 +1380,9 @@ def _build_sheet_prompt(label, summary, hard, question):
         "禁止将同一组数字复制粘贴到多个期别列。",
         "5. 硬数字必须原样引用，禁止修改或换算。",
         "6. 输出使用 Markdown，标题以 ## 开头，重点数字加粗。",
-        "7. 分析正文之后输出【图表数据】区块，每个分析模块至少一张图表，数据必须来自硬数字，禁止编造，格式：",
+        "7. 数据概览表只列核心指标（最多8行），禁止逐行或逐行号区间罗列，数据量大时用'共N行'概括。",
+        "8. 本工作表分析控制在 1500-3000 字，禁止枚举、重复或模板化输出。",
+        "9. 分析正文之后输出【图表数据】区块，每个分析模块至少一张图表，数据必须来自硬数字，禁止编造，格式：",
         "```chartjson",
         '[{"title": "图表标题", "type": "bar/pie/line/bar_h", "data": {"指标1": 数值, "指标2": 数值}}]',
         "```",
@@ -1441,7 +1445,12 @@ def _call_node_sheet(url, prompt, max_tokens=_SHEET_MAX_TOKENS, timeout=_NODE_TI
         raise RuntimeError(f"节点 {url} 请求失败: {str(e)}")
     if data.get("error"):
         raise RuntimeError(str(data["error"]))
-    return data.get("result", "")
+    result = data.get("result", "")
+    # 安全阀：节点失控输出（如逐行枚举）时截断，防止挤占主节点上下文与图表提取
+    if len(result) > 12000:
+        print(f"[分布式] 节点 {url} 输出过长 ({len(result)} 字符)，已截断")
+        result = result[:12000] + "\n（该分项输出过长，已截断）"
+    return result
 
 
 def _prepare_distributed_input(valid_files, question):
