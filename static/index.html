@@ -1338,6 +1338,7 @@ console.log('[QuantView] JS loaded');
                   midRender();
                 } else if (midCurrent) {
                   midCurrent.raw += chunk;
+                  midCurrent.dirty = true;
                   if (!window._midTimer) {
                     window._midTimer = setTimeout(function () {
                       window._midTimer = null;
@@ -1406,6 +1407,11 @@ console.log('[QuantView] JS loaded');
                     window._renderTimer = null;
                     var so = document.getElementById('streamOutput');
                     if (so) { so.innerHTML = renderMarkdown(fullText); }
+                    // 跟随滚动并入渲染节流，避免每个文本事件触发布局抖动
+                    var rc = document.getElementById('colRight');
+                    if (rc && rc.scrollHeight - rc.scrollTop - rc.clientHeight < 160) {
+                      rc.scrollTop = rc.scrollHeight;
+                    }
                   }, 150);
                 }
               }
@@ -1417,11 +1423,6 @@ console.log('[QuantView] JS loaded');
                 status = inThink ? ('思考中… (' + thinkText.length + ' 字)') : ('正在分析… (' + fullText.length + ' 字)');
               }
               document.getElementById('streamStatus').textContent = status;
-              // 右栏跟随滚动（用户已上翻查看时不强制拉回）
-              var rc = document.getElementById('colRight');
-              if (rc && rc.scrollHeight - rc.scrollTop - rc.clientHeight < 160) {
-                rc.scrollTop = rc.scrollHeight;
-              }
             } else if (data.type === 'charts') {
               chartsContainer.innerHTML = '';
               if (data.images && data.images.length > 0) {
@@ -1834,13 +1835,20 @@ console.log('[QuantView] JS loaded');
     card.appendChild(hdr);
     card.appendChild(body);
     nc.appendChild(card);
-    var rec = { title: title, node: node, raw: raw || '', body: body };
+    var rec = { title: title, node: node, raw: raw || '', body: body, dirty: true };
     midCards.push(rec);
     return rec;
   }
 
   function midRender() {
-    midCards.forEach(function (rec) { rec.body.innerHTML = renderMarkdown(rec.raw); });
+    // 只重渲染有更新的卡片，避免每次全量解析几十 KB markdown 卡死主线程
+    midCards.forEach(function (rec) {
+      if (!rec.dirty) return;
+      rec.dirty = false;
+      var st = rec.body.scrollTop;  // 保留滚动位置，重渲染不跳回顶部
+      rec.body.innerHTML = renderMarkdown(rec.raw);
+      rec.body.scrollTop = st;
+    });
     // 中栏跟随滚动（用户已上翻查看时不强制拉回）
     var col = document.getElementById('colMid');
     if (col && col.scrollHeight - col.scrollTop - col.clientHeight < 160) {
