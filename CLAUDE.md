@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Overview
 
-DeepAnalyze is a Chinese-language local data analysis assistant: a Flask backend (`app.py` + `file_processing.py`) serving a single-page vanilla-JS frontend (`static/index.html`). Users upload Excel/CSV/PDF files, ask a question in natural language, and get an AI-generated financial/business analysis report with matplotlib charts. There is no build step, no package manifest (no `requirements.txt`/`package.json`), and no test suite — dependencies are installed manually with pip.
+QuantView is a Chinese-language local data analysis assistant: a Flask backend (`app.py` + `file_processing.py`) serving a single-page vanilla-JS frontend (`static/index.html`). Users upload Excel/CSV/PDF files, ask a question in natural language, and get an AI-generated financial/business analysis report with matplotlib charts. There is no build step, no package manifest (no `requirements.txt`/`package.json`), and no test suite — dependencies are installed manually with pip.
 
 ## Running
 
@@ -66,7 +66,7 @@ Enabled by `DEEPANALYZE_NODES`; unset → classic single-node behavior. Flow (st
 
 1. `_prepare_distributed_input_impl` — per-sheet split: each sheet of each Excel file becomes one task (CSV/PDF = whole file, one task). Per-sheet summary from `df_summary` on the filtered DataFrame; per-sheet hard numbers from `extract_hard_numbers_by_sheet` (parses `extract_hard_numbers_core` output by `【工作表名】` headers).
 2. `_build_sheet_prompt` / `_build_overview_prompt` — compact prompts preserving the anti-hallucination rules (hard numbers must be quoted verbatim, no fabricated periods, `chartjson` required at the end).
-3. `_distributed_analysis_events` (SSE) / `_perform_analysis_distributed` (non-streaming) — submit tasks to `ThreadPoolExecutor` (`max_workers = node count + 1`), round-robin across **all nodes including the master itself** (`_work_nodes`/`_submit_node_task`: master runs local inference via `_run_inference`, accelerator nodes via `_call_node_sheet` POST `/analyze/sheet`). Failed nodes degrade to a ⚠️ failure section instead of aborting the report.
+3. `_distributed_analysis_events` (SSE) / `_perform_analysis_distributed` (non-streaming) — round-robin across **all nodes including the master itself** (`_work_nodes`/`_submit_node_task`). The streaming path is **chunk-streamed**: each task runs in a `threading.Thread` (`_stream_section_worker`) that pumps text chunks into a `queue.Queue` — local tasks iterate `_run_inference(stream=True)`, accelerator nodes read `/analyze/sheet/stream` SSE — and the master generator forwards chunks to the browser as they arrive (first chunk of each section carries the `### 工作表「x」分析（节点：y）` heading). Failed nodes degrade to a ⚠️ failure section instead of aborting the report.
 4. After all sections: the master's own model runs the overview prompt (`_run_inference`), producing 总览/综合结论. The final report = per-sheet sections + overview, and all `chartjson` blocks from all parts are rendered (multiple blocks supported via `finditer`).
 
 Each node is just another `app.py` instance — it needs its own model (or `DEEPANALYZE_DEBUG` + API key) and exposes `/analyze/sheet` automatically. Workers must NOT set `DEEPANALYZE_NODES` (avoid recursive distribution).
@@ -85,6 +85,7 @@ Each node is just another `app.py` instance — it needs its own model (or `DEEP
 | `POST /analyze` | Multipart `files` + `question` → `{result, images, mode, nodes}` (non-streaming; single-node and distributed) |
 | `POST /analyze/stream` | Same input, SSE stream of `{type: meta|progress|text|think|charts|error|done}` events (single-node and distributed) |
 | `POST /analyze/sheet` | **Accelerator-node job endpoint**: JSON `{prompt, max_tokens}` → `{result}`. Calls `_run_inference` non-streaming |
+| `POST /analyze/sheet/stream` | **Accelerator-node streaming endpoint**: same input, SSE `{type: text|think|error|done}` events; master forwards chunks to the browser so 中栏 cards fill in real time |
 | `POST /export/docx` | Receives HTML report JSON, spawns `export_docx.py` as a subprocess, returns the .docx |
 
 ### Frontend (`static/index.html`)

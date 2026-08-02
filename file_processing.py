@@ -1,4 +1,4 @@
-"""DeepAnalyze - 文件处理模块
+"""QuantView - 文件处理模块
 
 负责上传文件的读取与解析（Excel/CSV/PDF → DataFrame）、
 数据摘要生成（_df_summary 系列）与硬数字提取（_extract_hard_numbers 系列）。

@@ -1,4 +1,4 @@
-"""DeepAnalyze - 本地数据分析助手 (Flask 后端入口)
+"""QuantView - 本地数据分析助手 (Flask 后端入口)
 
 启动方式:
     conda activate deepanalyze
@@ -25,6 +25,8 @@ import urllib.request
 import urllib.error
 import time
 import re
+import queue
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from file_processing import (
@@ -1636,44 +1638,104 @@ def _prepare_distributed_input_impl(valid_files, question):
     }
 
 
-def _distributed_analysis_events(prep, question, output_parts):
-    """分布式流式分析：并行分发工作表任务 → 逐个产出小节 → 主节点生成总览。
+def _stream_section_worker(q, node, t):
+    """流式工作表任务线程：把文本块逐个放入队列。
 
-    yield ("think"|"text", chunk)，并把所有文本块累计进 output_parts 供图表提取。
+    队列元素: ("chunk", t, node, evt_type, chunk) / ("error", t, node, msg) / ("done", t, node, None)
+    首个文本块自带小节标题头（### 工作表「x」分析（节点：y））。
+    """
+    first = True
+    try:
+        if node["url"] is None:
+            # 主节点本地任务：直接流式推理
+            for evt, chunk in _run_inference(t["prompt"], max_tokens=_SHEET_MAX_TOKENS, stream=True):
+                if evt == "think":
+                    q.put(("chunk", t, node, ("think", chunk)))
+                else:
+                    if first:
+                        chunk = f"\n\n### 工作表「{t['label']}」分析（节点：{node['name']}）\n\n" + chunk
+                        first = False
+                    q.put(("chunk", t, node, ("text", chunk)))
+        else:
+            # 加速节点任务：SSE 流式读取
+            body = json.dumps({"prompt": t["prompt"], "max_tokens": _SHEET_MAX_TOKENS}).encode("utf-8")
+            req = urllib.request.Request(
+                node["url"] + "/analyze/sheet/stream",
+                data=body,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=_NODE_TIMEOUT) as resp:
+                for line in resp:
+                    line = line.decode("utf-8").strip()
+                    if not line.startswith("data: "):
+                        continue
+                    try:
+                        data = json.loads(line[6:])
+                    except json.JSONDecodeError:
+                        continue
+                    if data.get("type") == "text":
+                        chunk = data.get("content", "")
+                        if first:
+                            chunk = f"\n\n### 工作表「{t['label']}」分析（节点：{node['name']}）\n\n" + chunk
+                            first = False
+                        q.put(("chunk", t, node, ("text", chunk)))
+                    elif data.get("type") == "think":
+                        q.put(("chunk", t, node, ("think", data.get("content", ""))))
+                    elif data.get("type") == "error":
+                        raise RuntimeError(data.get("content", "节点流式任务错误"))
+        if first:
+            # 节点没有产出任何文本（空输出）
+            q.put(("chunk", t, node, ("text", f"\n\n### 工作表「{t['label']}」分析（节点：{node['name']}）\n\n（节点未返回有效分析内容）\n")))
+    except Exception as e:
+        q.put(("error", t, node, str(e)))
+    finally:
+        q.put(("done", t, node, None))
+
+
+def _distributed_analysis_events(prep, question, output_parts):
+    """分布式流式分析：并行分发工作表任务（流式）→ 逐块产出 → 主节点生成总览。
+
+    yield ("think"|"text"|"progress", chunk)，并把所有文本块累计进 output_parts 供图表提取。
     """
     workers = _work_nodes()
     tasks = prep["tasks"]
-    print(f"[分布式] {len(tasks)} 个工作表任务，分发给 {len(workers)} 个节点（含主节点自身）")
+    print(f"[分布式] {len(tasks)} 个工作表任务（流式），分发给 {len(workers)} 个节点（含主节点自身）")
     sections = []
     failures = 0
     done = 0
     total = len(tasks)
+    q = queue.Queue()
+    pending = len(tasks)
+    section_parts = {}  # id(t) → [文本块]，供总览 prompt 使用
 
-    with ThreadPoolExecutor(max_workers=len(workers)) as ex:
-        fut_map = {}
-        for i, t in enumerate(tasks):
-            node = workers[i % len(workers)]
-            fut = _submit_node_task(ex, node, t["prompt"])
-            fut_map[fut] = (t, node)
+    for i, t in enumerate(tasks):
+        node = workers[i % len(workers)]
+        threading.Thread(target=_stream_section_worker, args=(q, node, t), daemon=True).start()
 
-        for fut in as_completed(fut_map):
-            t, node = fut_map[fut]
-            try:
-                section = fut.result().strip()
-            except Exception as e:
-                failures += 1
-                block = f"\n\n### 工作表「{t['label']}」分析（节点：{node['name']}）\n\n⚠️ 该任务分析失败：{str(e)}\n"
-                output_parts.append(block)
-                yield ("text", block)
-                done += 1
-                yield ("progress", {"done": done, "total": total})
-                continue
-            if not section:
-                section = "（节点未返回有效分析内容）"
-            sections.append((t["label"], node["name"], section))
-            block = f"\n\n### 工作表「{t['label']}」分析（节点：{node['name']}）\n\n{section}\n"
+    while pending > 0:
+        kind, t, node, arg = q.get()
+        if kind == "chunk":
+            evt, chunk = arg
+            if evt == "think":
+                yield ("think", chunk)
+            else:
+                output_parts.append(chunk)
+                section_parts.setdefault(id(t), []).append(chunk)
+                yield ("text", chunk)
+        elif kind == "error":
+            failures += 1
+            block = f"\n\n### 工作表「{t['label']}」分析（节点：{node['name']}）\n\n⚠️ 该任务分析失败：{arg}\n"
             output_parts.append(block)
             yield ("text", block)
+            pending -= 1
+            done += 1
+            yield ("progress", {"done": done, "total": total})
+        elif kind == "done":
+            parts = section_parts.get(id(t))
+            if parts:
+                sections.append((t["label"], node["name"], "".join(parts).strip()))
+            pending -= 1
             done += 1
             yield ("progress", {"done": done, "total": total})
 
@@ -1741,7 +1803,7 @@ def _perform_analysis_distributed(prep, question):
 
     report_lines = [
         "=" * 60,
-        "DeepAnalyze 数据分析报告（分布式）",
+        "QuantView 数据分析报告（分布式）",
         "=" * 60,
         "",
         f"分析文件 ({len(prep['filenames'])} 个): {', '.join(prep['filenames'])}",
@@ -1792,6 +1854,43 @@ def analyze_sheet():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/analyze/sheet/stream", methods=["POST"])
+def analyze_sheet_stream():
+    """加速节点的流式工作表分析端点：SSE 推送 {"type": "text"|"think"|"done", ...}。"""
+    data = request.get_json(force=True, silent=True) or {}
+    prompt = (data.get("prompt") or "").strip()
+    if not prompt:
+        return jsonify({"error": "缺少 prompt"}), 400
+    try:
+        max_tokens = int(data.get("max_tokens", _SHEET_MAX_TOKENS))
+    except (TypeError, ValueError):
+        max_tokens = _SHEET_MAX_TOKENS
+    m = re.search(r"工作表「([^」]+)」", prompt[:300])
+    label = m.group(1) if m else "未命名任务"
+    print(f"[节点任务] 收到(流式): {label} ({len(prompt)} 字符) @ {time.strftime('%H:%M:%S')}")
+    t0 = time.time()
+
+    def generate():
+        try:
+            for evt_type, chunk in _run_inference(prompt, max_tokens=max_tokens, stream=True):
+                if evt_type == "think":
+                    yield f"data: {json.dumps({'type': 'think', 'content': chunk}, ensure_ascii=False)}\n\n"
+                else:
+                    yield f"data: {json.dumps({'type': 'text', 'content': chunk}, ensure_ascii=False)}\n\n"
+            print(f"[节点任务] 完成(流式): {label} 耗时 {time.time()-t0:.1f}s")
+        except Exception as e:
+            print(f"[节点任务] 失败(流式): {label} 耗时 {time.time()-t0:.1f}s 错误: {e}")
+            yield f"data: {json.dumps({'type': 'error', 'content': str(e)}, ensure_ascii=False)}\n\n"
+        finally:
+            yield "data: {\"type\": \"done\"}\n\n"
+
+    return Response(
+        stream_with_context(generate()),
+        mimetype="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
 @app.route("/analyze/stream", methods=["POST"])
 def analyze_stream():
     """流式分析接口 — SSE 逐字推送模型输出。"""
@@ -1836,7 +1935,7 @@ def analyze_stream():
             # 推送报告头
             header = "\n".join([
                 "=" * 60,
-                "DeepAnalyze 数据分析报告",
+                "QuantView 数据分析报告",
                 "=" * 60,
                 "",
                 f"分析文件 ({len(valid_files)} 个): {', '.join(prep['filenames'])}",
@@ -1937,7 +2036,7 @@ def perform_analysis(files, question):
     # ── 拼装最终报告 ──
     report_lines = [
         "=" * 60,
-        "DeepAnalyze 数据分析报告",
+        "QuantView 数据分析报告",
         "=" * 60,
         "",
         f"分析文件 ({len(files)} 个): {', '.join(prep['filenames'])}",
@@ -1971,7 +2070,7 @@ def export_docx():
         return jsonify({"error": "缺少报告内容"}), 400
 
     html_content = data.get("html", data.get("text", ""))
-    title = data.get("title", "DeepAnalyze 分析报告")
+    title = data.get("title", "QuantView 分析报告")
 
     # 优先用独立脚本
     script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "export_docx.py")
@@ -1993,7 +2092,7 @@ def export_docx():
                 out_path,
                 mimetype='application/vnd.openxmlformats-officedocument.wordprocessingml.document',
                 as_attachment=True,
-                download_name=f'DeepAnalyze_{title[:30]}.docx'
+                download_name=f'QuantView_{title[:30]}.docx'
             )
         finally:
             try: os.unlink(html_path)
@@ -2006,7 +2105,7 @@ def export_docx():
 
 if __name__ == "__main__":
     print("=" * 60)
-    print("DeepAnalyze - 本地数据分析助手")
+    print("QuantView - 本地数据分析助手")
     print("=" * 60)
     print()
     _port = int(os.environ.get("DEEPANALYZE_PORT", "5000"))

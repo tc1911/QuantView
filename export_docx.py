@@ -123,7 +123,7 @@ def main():
     output_path = sys.argv[2]
 
     # 解析 --title 参数
-    title = "DeepAnalyze 分析报告"
+    title = "QuantView 分析报告"
     for i, arg in enumerate(sys.argv):
         if arg == "--title" and i + 1 < len(sys.argv):
             title = sys.argv[i + 1]

@@ -1,5 +1,5 @@
 @echo off
-title DeepAnalyze
+title QuantView
 
 cd /d "%~dp0"
 
@@ -12,7 +12,7 @@ if exist "venv\Scripts\python.exe" (
 )
 
 echo ========================================
-echo   DeepAnalyze - Starting...
+echo   QuantView - Starting...
 echo   Open http://localhost:5000
 echo   Press Ctrl+C to stop
 echo ========================================

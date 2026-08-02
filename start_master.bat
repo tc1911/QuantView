@@ -1,5 +1,5 @@
 @echo off
-title DeepAnalyze - 主节点（分布式）
+title QuantView - 主节点（分布式）
 cd /d "%~dp0"
 
 rem ════════════════════════════════════════════════════════════
@@ -20,7 +20,7 @@ if exist "venv\Scripts\python.exe" (
 )
 
 echo ========================================
-echo   DeepAnalyze 主节点（分布式）- Starting...
+echo   QuantView 主节点（分布式）- Starting...
 echo   节点: %DEEPANALYZE_NODES%
 echo   Press Ctrl+C to stop
 echo ========================================

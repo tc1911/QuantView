@@ -1,5 +1,5 @@
 @echo off
-title DeepAnalyze - 加速节点
+title QuantView - 加速节点
 cd /d "%~dp0"
 
 rem ════════════════════════════════════════════════════════════
@@ -30,7 +30,7 @@ if exist "venv\Scripts\python.exe" (
 )
 
 echo ========================================
-echo   DeepAnalyze 加速节点（无头） - Starting...
+echo   QuantView 加速节点（无头） - Starting...
 echo   端口: %DEEPANALYZE_PORT%
 echo   Press Ctrl+C to stop
 echo ========================================

@@ -1,7 +1,7 @@
-$host.ui.RawUI.WindowTitle = "DeepAnalyze - 本地数据分析助手"
+$host.ui.RawUI.WindowTitle = "QuantView - 本地数据分析助手"
 
 Write-Host "========================================"  -ForegroundColor Cyan
-Write-Host "  DeepAnalyze 本地数据分析助手" -ForegroundColor Cyan
+Write-Host "  QuantView 本地数据分析助手" -ForegroundColor Cyan
 Write-Host "========================================" -ForegroundColor Cyan
 Write-Host ""
 

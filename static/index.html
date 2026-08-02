@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>DeepAnalyze - 本地数据分析助手</title>
+<title>QuantView - 本地数据分析助手</title>
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
@@ -827,7 +827,7 @@
 <header class="header">
   <div class="header-brand">
     <svg viewBox="0 0 32 32" fill="none"><rect x="2" y="2" width="12" height="12" rx="2" fill="#1a56db"/><rect x="18" y="2" width="12" height="12" rx="2" fill="#60a5fa"/><rect x="2" y="18" width="12" height="12" rx="2" fill="#60a5fa"/><rect x="18" y="18" width="12" height="12" rx="2" fill="#1a56db"/><rect x="14" y="14" width="4" height="4" rx="1" fill="#fff" opacity="0.8"/></svg>
-    DeepAnalyze
+    QuantView
   </div>
   <div style="display:flex;align-items:center;gap:12px">
     <button class="theme-toggle" id="themeToggle" title="切换深色模式">
@@ -946,13 +946,13 @@
 </main>
 
 <footer class="footer">
-  DeepAnalyze &mdash; 本地数据分析助手 &mdash; 所有数据处理均在本地完成
+  QuantView &mdash; 本地数据分析助手 &mdash; 所有数据处理均在本地完成
 </footer>
 
 <script>
-console.log('[DeepAnalyze] JS loaded');
+console.log('[QuantView] JS loaded');
 (function () {
-  console.log('[DeepAnalyze] IIFE running');
+  console.log('[QuantView] IIFE running');
   // ── Dark Mode ──
   var STORAGE_KEY = 'deepanalyze-theme';
   var html = document.documentElement;
@@ -1184,8 +1184,7 @@ console.log('[DeepAnalyze] JS loaded');
 
     // Show streaming indicator
     loadingContainer.innerHTML = '<div class="spinner"></div>' +
-      '<div class="loading-text" id="streamStatus">正在分析…</div>' +
-      '<div class="loading-hint">实时接收 DeepSeek 分析结果</div>';
+      '<div class="loading-text" id="streamStatus">正在分析…</div>';
     loadingContainer.classList.add('active');
     submitBtn.disabled = false;
     submitBtn.textContent = '停止分析';
@@ -1968,7 +1967,7 @@ console.log('[DeepAnalyze] JS loaded');
     var blob = new Blob([text], { type: 'text/markdown;charset=utf-8' });
     var url = URL.createObjectURL(blob);
     var a = document.createElement('a');
-    a.href = url; a.download = 'DeepAnalyze_' + new Date().toISOString().slice(0,10) + '.md';
+    a.href = url; a.download = 'QuantView_' + new Date().toISOString().slice(0,10) + '.md';
     document.body.appendChild(a); a.click(); document.body.removeChild(a);
     URL.revokeObjectURL(url);
   });
@@ -1991,7 +1990,7 @@ console.log('[DeepAnalyze] JS loaded');
       }).then(function (b) {
         var u = URL.createObjectURL(b);
         var a = document.createElement('a');
-        a.href = u; a.download = 'DeepAnalyze_' + new Date().toISOString().slice(0,10) + '.docx';
+        a.href = u; a.download = 'QuantView_' + new Date().toISOString().slice(0,10) + '.docx';
         document.body.appendChild(a); a.click(); document.body.removeChild(a);
         URL.revokeObjectURL(u);
       }).catch(function (e) { showError('Word导出失败：'+e.message); })
