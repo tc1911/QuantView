@@ -136,7 +136,7 @@
 
   /* ── Main Layout ── */
   .main-container {
-    max-width: 960px;
+    max-width: 1720px;
     margin: 0 auto;
     padding: 24px 32px 48px;
     display: flex;
@@ -748,6 +748,69 @@
   [data-theme="dark"] .result-content::-webkit-scrollbar-thumb {
     background: #475569;
   }
+  /* ── 三栏布局：左输入 / 中节点工作 / 右成品 ── */
+  .main-grid {
+    display: grid;
+    grid-template-columns: minmax(300px, 360px) minmax(340px, 1fr) minmax(380px, 1fr);
+    gap: 20px;
+    align-items: start;
+  }
+  .col-left, .col-mid, .col-right {
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+    min-width: 0;
+  }
+  .node-pane { display: flex; flex-direction: column; max-height: calc(100vh - 120px); }
+  .node-pane .card-title { flex-shrink: 0; }
+  .node-content {
+    flex: 1;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    min-height: 200px;
+  }
+  .node-placeholder {
+    color: var(--text-muted);
+    font-size: 13px;
+    text-align: center;
+    padding: 40px 20px;
+    border: 1px dashed var(--border);
+    border-radius: var(--radius);
+  }
+  .node-card {
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    overflow: hidden;
+    background: var(--result-bg);
+  }
+  .node-card-header {
+    padding: 8px 12px;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--primary);
+    background: var(--primary-light);
+    border-bottom: 1px solid var(--border);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .node-card-body {
+    padding: 10px 12px;
+    font-size: 12.5px;
+    line-height: 1.7;
+    color: var(--text);
+    max-height: 320px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+  }
+  @media (max-width: 1200px) {
+    .main-grid { grid-template-columns: 1fr; }
+    .node-pane { max-height: none; }
+  }
+
   /* ── Responsive ── */
   @media (max-width: 640px) {
     .header { padding: 0 16px; }
@@ -793,6 +856,8 @@
 
 <!-- Main -->
 <main class="main-container">
+<div class="main-grid">
+  <div class="col-left">
 
   <!-- Step 1: Upload -->
   <div class="card" id="uploadCard">
@@ -834,7 +899,20 @@
   <!-- Error -->
   <div class="alert alert-error" id="errorAlert"></div>
 
+  </div><!-- /col-left -->
+
+  <!-- 节点工作内容 -->
+  <div class="col-mid">
+    <div class="card node-pane" id="nodePaneCard">
+      <div class="card-title">节点工作内容</div>
+      <div class="node-content" id="nodeContent">
+        <div class="node-placeholder">等待分析…</div>
+      </div>
+    </div>
+  </div>
+
   <!-- Result -->
+  <div class="col-right">
   <div class="result-section card" id="resultSection">
     <div class="card-title">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M9 12l2 2 4-4"/></svg>
@@ -862,7 +940,9 @@
       </button>
     </div>
   </div>
+  </div><!-- /col-right -->
 
+</div><!-- /main-grid -->
 </main>
 
 <footer class="footer">
@@ -948,6 +1028,7 @@ console.log('[DeepAnalyze] JS loaded');
     chartsContainer.innerHTML = '';
     hideError();
     clearMetaBadge();
+    midReset('等待分析…');
   }
 
   function setLoading(loading) {
@@ -1099,6 +1180,7 @@ console.log('[DeepAnalyze] JS loaded');
     resultSection.classList.remove('active');
     chartsContainer.innerHTML = '';
     clearMetaBadge();
+    midReset('等待分析…');
 
     // Show streaming indicator
     loadingContainer.innerHTML = '<div class="spinner"></div>' +
@@ -1217,6 +1299,11 @@ console.log('[DeepAnalyze] JS loaded');
             if (data.type === 'meta') {
               currentMeta = data;
               renderMetaBadge(data);
+              if (data.mode === 'distributed') {
+                midReset('等待任务分发…');
+              } else {
+                midReset('单节点模式：无分节点工作内容');
+              }
             } else if (data.type === 'progress') {
               lastProgress = data;
               updateMetaProgress(data);
@@ -1288,6 +1375,27 @@ console.log('[DeepAnalyze] JS loaded');
                 }
               }
 
+              // 中栏：节点工作内容（分布式模式按小节建卡片，总览流式追加）
+              if (currentMeta && currentMeta.mode === 'distributed') {
+                var mSec = chunk.match(/^### 工作表「(.+?)」分析（节点：(.+?)）$/m);
+                var mOv = chunk.match(/^## 总览与综合结论/m);
+                if (mSec) {
+                  midCurrent = midAddCard(mSec[1], mSec[2], chunk.replace(/^### 工作表「(.+?)」分析（节点：(.+?)）\n/m, ''));
+                  midRender();
+                } else if (mOv) {
+                  midCurrent = midAddCard('总览与综合结论', '主节点', chunk.replace(/^## 总览与综合结论（主节点生成）\n/m, ''));
+                  midRender();
+                } else if (midCurrent) {
+                  midCurrent.raw += chunk;
+                  if (!window._midTimer) {
+                    window._midTimer = setTimeout(function () {
+                      window._midTimer = null;
+                      midRender();
+                    }, 300);
+                  }
+                }
+              }
+
               var status = inThink ? ('思考中… (' + thinkText.length + ' 字)') : ('正在分析… (' + fullText.length + ' 字)');
               document.getElementById('streamStatus').textContent = status;
               resultContent.scrollTop = resultContent.scrollHeight;
@@ -1333,6 +1441,8 @@ console.log('[DeepAnalyze] JS loaded');
               // Flush pending render
               if (window._renderTimer) { clearTimeout(window._renderTimer); window._renderTimer = null; }
               if (window._persistTimer) { clearTimeout(window._persistTimer); window._persistTimer = null; }
+              if (window._midTimer) { clearTimeout(window._midTimer); window._midTimer = null; }
+              midRender();
               (document.getElementById('streamOutput') || {}).innerHTML = renderMarkdown(fullText);
 
               // Save to session
@@ -1678,6 +1788,55 @@ console.log('[DeepAnalyze] JS loaded');
     el.innerHTML = '';
   }
 
+  // ── 节点工作内容（中栏） ──
+  var midCards = [];
+  var midCurrent = null;
+
+  function midReset(placeholder) {
+    midCards = [];
+    midCurrent = null;
+    var nc = document.getElementById('nodeContent');
+    if (nc) nc.innerHTML = '<div class="node-placeholder">' + (placeholder || '等待分析…') + '</div>';
+  }
+
+  function midAddCard(title, node, raw) {
+    var nc = document.getElementById('nodeContent');
+    var card = document.createElement('div');
+    card.className = 'node-card';
+    var hdr = document.createElement('div');
+    hdr.className = 'node-card-header';
+    hdr.textContent = title + '（节点：' + node + '）';
+    var body = document.createElement('div');
+    body.className = 'node-card-body';
+    card.appendChild(hdr);
+    card.appendChild(body);
+    nc.appendChild(card);
+    var rec = { title: title, node: node, raw: raw || '', body: body };
+    midCards.push(rec);
+    return rec;
+  }
+
+  function midRender() {
+    midCards.forEach(function (rec) { rec.body.innerHTML = renderMarkdown(rec.raw); });
+    var nc = document.getElementById('nodeContent');
+    if (nc) nc.scrollTop = nc.scrollHeight;
+  }
+
+  // 会话回放：从保存的完整报告文本中重建各节点卡片
+  function midRebuildFromText(text) {
+    midReset('');
+    if (!text) return;
+    var re = /^### 工作表「(.+?)」分析（节点：(.+?)）\n\n([\s\S]*?)(?=^### 工作表「|^## 总览与综合结论|$)/gm;
+    var m;
+    while ((m = re.exec(text)) !== null) {
+      midAddCard(m[1], m[2], m[3].trim());
+    }
+    var ov = text.match(/^## 总览与综合结论（主节点生成）\n\n([\s\S]*?)(?=^### 工作表「|$)/m);
+    if (ov) midAddCard('总览与综合结论', '主节点', ov[1].trim());
+    if (!midCards.length) { midReset('无分节点内容'); return; }
+    midRender();
+  }
+
   // ── History management ──
   var SESSIONS_KEY = 'deepanalyze-sessions';
   // 运行中的会话也持久化（定时保存部分输出），刷新后恢复为"中断"状态
@@ -1739,6 +1898,12 @@ console.log('[DeepAnalyze] JS loaded');
         var ie = document.createElement('img'); ie.src = img[1]; ie.alt = img[0] || '图表'; ie.loading = 'lazy';
         item.appendChild(h); item.appendChild(ie); chartsContainer.appendChild(item);
       });
+      // 中栏回放：分布式会话重建各节点卡片
+      if (s.meta && s.meta.mode === 'distributed') {
+        midRebuildFromText(s.outputText);
+      } else {
+        midReset('单节点模式：无分节点工作内容');
+      }
     }
     resultSection.scrollIntoView({ behavior: 'smooth', block: 'start' });
     renderSessionList();
