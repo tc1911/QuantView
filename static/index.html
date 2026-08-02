@@ -403,6 +403,32 @@
   .result-content::-webkit-scrollbar { width: 6px; }
   .result-content::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 3px; }
 
+  /* ── 分析模式徽标（单节点 / 分布式） ── */
+  .analysis-meta {
+    display: none;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-bottom: 12px;
+    padding: 8px 12px;
+    border-radius: var(--radius);
+    background: var(--card-bg);
+    border: 1px solid var(--border);
+    font-size: 12px;
+    color: var(--text-secondary);
+  }
+  .analysis-meta.active { display: flex; }
+  .meta-pill {
+    padding: 2px 10px;
+    border-radius: 999px;
+    font-weight: 600;
+    font-size: 12px;
+  }
+  .meta-pill.meta-single { background: var(--primary-light); color: var(--primary); }
+  .meta-pill.meta-distributed { background: #fef3c7; color: #b45309; }
+  [data-theme="dark"] .meta-pill.meta-distributed { background: #3b2f10; color: #fbbf24; }
+  .meta-progress { margin-left: auto; font-variant-numeric: tabular-nums; }
+
   /* ── Think block (collapsible) ── */
   .think-block {
     border: 1px solid var(--border);
@@ -791,6 +817,7 @@
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M9 12l2 2 4-4"/></svg>
       分析报告
     </div>
+    <div class="analysis-meta" id="analysisMeta"></div>
     <div class="result-content" id="resultContent"></div>
     <div class="charts-container" id="chartsContainer"></div>
     <div class="result-actions">
@@ -897,6 +924,7 @@ console.log('[DeepAnalyze] JS loaded');
     resultContent.textContent = '';
     chartsContainer.innerHTML = '';
     hideError();
+    clearMetaBadge();
   }
 
   function setLoading(loading) {
@@ -1047,6 +1075,7 @@ console.log('[DeepAnalyze] JS loaded');
     hideError();
     resultSection.classList.remove('active');
     chartsContainer.innerHTML = '';
+    clearMetaBadge();
 
     // Show streaming indicator
     loadingContainer.innerHTML = '<div class="spinner"></div>' +
@@ -1082,6 +1111,8 @@ console.log('[DeepAnalyze] JS loaded');
     var thinkOpener = '<think>';
     var thinkCloser = '</think>';
     var thinkBuf = '';   // sliding buffer for cross-chunk boundary detection
+    var currentMeta = null;
+    var lastProgress = null;
     function getStreamOutput() { return document.getElementById('streamOutput'); }
 
     function findThinkEnd(text) {
@@ -1160,7 +1191,13 @@ console.log('[DeepAnalyze] JS loaded');
               var data = JSON.parse(dataStr);
             } catch (e) { return; }
 
-            if (data.type === 'think') {
+            if (data.type === 'meta') {
+              currentMeta = data;
+              renderMetaBadge(data);
+            } else if (data.type === 'progress') {
+              lastProgress = data;
+              updateMetaProgress(data);
+            } else if (data.type === 'think') {
               thinkText += data.content;
               inThink = false;  // SSE think events → text stream is output
               ensureThinkBlock();
@@ -1268,7 +1305,11 @@ console.log('[DeepAnalyze] JS loaded');
               (document.getElementById('streamOutput') || {}).innerHTML = renderMarkdown(fullText);
 
               // Save to session
-              if (activeSid) { var cur = getSession(activeSid); if (cur) { cur.thinkText = thinkText; cur.outputText = fullText; cur.images = imgData; cur.status = 'done'; cur.controller = null; persistSessions(); } }
+              if (activeSid) { var cur = getSession(activeSid); if (cur) { cur.thinkText = thinkText; cur.outputText = fullText; cur.images = imgData; cur.status = 'done'; cur.controller = null; cur.meta = currentMeta; persistSessions(); } }
+              if (lastProgress) {
+                var mp = document.getElementById('metaProgress');
+                if (mp) mp.textContent = '分项分析完成（' + lastProgress.done + '/' + lastProgress.total + '）';
+              }
               document.getElementById('streamStatus').textContent = '分析完成';
               renderResult(finalOut);
               loadingContainer.classList.remove('active');
@@ -1567,6 +1608,33 @@ console.log('[DeepAnalyze] JS loaded');
     window.scrollTo({ top: 0, behavior: 'smooth' });
   });
 
+  // ── 分析模式徽标（单节点 / 分布式 + 节点列表 + 分项进度） ──
+  function renderMetaBadge(meta) {
+    var el = document.getElementById('analysisMeta');
+    if (!el) return;
+    if (meta.mode === 'distributed') {
+      el.innerHTML =
+        '<span class="meta-pill meta-distributed">分布式模式</span>' +
+        '<span class="meta-nodes">' + escHtml((meta.nodes || []).join('、')) + '</span>' +
+        '<span class="meta-progress" id="metaProgress"></span>';
+    } else {
+      el.innerHTML = '<span class="meta-pill meta-single">单节点模式</span>';
+    }
+    el.classList.add('active');
+  }
+
+  function updateMetaProgress(p) {
+    var el = document.getElementById('metaProgress');
+    if (el) el.textContent = '分项分析 ' + p.done + '/' + p.total;
+  }
+
+  function clearMetaBadge() {
+    var el = document.getElementById('analysisMeta');
+    if (!el) return;
+    el.classList.remove('active');
+    el.innerHTML = '';
+  }
+
   // ── History management ──
   var SESSIONS_KEY = 'deepanalyze-sessions';
   function persistSessions() { var ts = sessions.filter(function(s){return s.status==='done';}); try{localStorage.setItem(SESSIONS_KEY,JSON.stringify(ts.slice(0,50)));}catch(e){} }
@@ -1578,7 +1646,7 @@ console.log('[DeepAnalyze] JS loaded');
   function createSession(question, filenames, ctrl) {
     var sid = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
     var s = { id: sid, question: question, files: filenames, time: new Date().toLocaleString('zh-CN'),
-      thinkText: '', outputText: '', images: [], status: 'running', controller: ctrl };
+      thinkText: '', outputText: '', images: [], status: 'running', controller: ctrl, meta: null };
     sessions.unshift(s); activeSid = sid; renderSessionList(); return s;
   }
 
@@ -1592,6 +1660,8 @@ console.log('[DeepAnalyze] JS loaded');
     var s = getSession(sid) || loadPersisted().find(function (ps) { return ps.id === sid; });
     if (!s) return;
     resultSection.classList.add('active');
+    clearMetaBadge();
+    if (s.meta) renderMetaBadge(s.meta);
     if (s.status === 'running') {
       loadingContainer.classList.add('active');
       submitBtn.disabled = false; submitBtn.textContent = '停止分析'; submitBtn.classList.add('btn-stop');

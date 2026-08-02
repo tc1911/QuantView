@@ -77,14 +77,14 @@ Each node is just another `app.py` instance — it needs its own model (or `DEEP
 | Route | Purpose |
 |---|---|
 | `GET /` | Serve `index.html` (no-cache headers) |
-| `POST /analyze` | Multipart `files` + `question` → `{result, images}` (non-streaming; single-node and distributed) |
-| `POST /analyze/stream` | Same input, SSE stream of `{type: text|think|charts|error|done}` events (single-node and distributed) |
+| `POST /analyze` | Multipart `files` + `question` → `{result, images, mode, nodes}` (non-streaming; single-node and distributed) |
+| `POST /analyze/stream` | Same input, SSE stream of `{type: meta|progress|text|think|charts|error|done}` events (single-node and distributed) |
 | `POST /analyze/sheet` | **Accelerator-node job endpoint**: JSON `{prompt, max_tokens}` → `{result}`. Calls `_run_inference` non-streaming |
 | `POST /export/docx` | Receives HTML report JSON, spawns `export_docx.py` as a subprocess, returns the .docx |
 
 ### Frontend (`static/index.html`)
 
-Single file, zero external libraries — CSS variables for dark/light themes, hand-rolled `renderMarkdown`, fetch + `ReadableStream` parsing of the SSE stream (note: not `EventSource`). Sessions persist to `localStorage` (last 50, key `SESSIONS_KEY`), with live think-block rendering, abort controller, and throttled (150ms) markdown re-render during streaming. `index.html.bak` is a stale backup, not served.
+Single file, zero external libraries — CSS variables for dark/light themes, hand-rolled `renderMarkdown`, fetch + `ReadableStream` parsing of the SSE stream (note: not `EventSource`). Sessions persist to `localStorage` (last 50, key `SESSIONS_KEY`), with live think-block rendering, abort controller, and throttled (150ms) markdown re-render during streaming. A mode badge (`.analysis-meta`) renders the SSE `meta` event (单节点/分布式 + node names) and live `progress` events (分项分析 N/M); the badge persists per-session and is re-rendered on session replay. `index.html.bak` is a stale backup, not served.
 
 ### Word export (`export_docx.py`)
 

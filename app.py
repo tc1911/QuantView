@@ -559,6 +559,8 @@ def analyze():
         return jsonify({
             "result": output["result"],
             "images": output.get("images", []),
+            "mode": output.get("mode", "single"),
+            "nodes": output.get("nodes", []),
         })
     except Exception as e:
         return jsonify({"error": f"分析过程出错: {str(e)}"}), 500
@@ -1503,6 +1505,8 @@ def _distributed_analysis_events(prep, question, output_parts):
     print(f"[分布式] {len(tasks)} 个工作表任务，分发给 {len(nodes)} 个节点")
     sections = []
     failures = 0
+    done = 0
+    total = len(tasks)
 
     with ThreadPoolExecutor(max_workers=len(nodes)) as ex:
         fut_map = {}
@@ -1520,6 +1524,8 @@ def _distributed_analysis_events(prep, question, output_parts):
                 block = f"\n\n### 工作表「{t['label']}」分析（节点：{node['name']}）\n\n⚠️ 该任务分析失败：{str(e)}\n"
                 output_parts.append(block)
                 yield ("text", block)
+                done += 1
+                yield ("progress", {"done": done, "total": total})
                 continue
             if not section:
                 section = "（节点未返回有效分析内容）"
@@ -1527,6 +1533,8 @@ def _distributed_analysis_events(prep, question, output_parts):
             block = f"\n\n### 工作表「{t['label']}」分析（节点：{node['name']}）\n\n{section}\n"
             output_parts.append(block)
             yield ("text", block)
+            done += 1
+            yield ("progress", {"done": done, "total": total})
 
     # ── 主节点生成总览 ──
     intro = "\n\n---\n\n## 总览与综合结论（主节点生成）\n\n"
@@ -1610,7 +1618,12 @@ def _perform_analysis_distributed(prep, question):
         "报告生成完毕",
         "-" * 40,
     ]
-    return {"result": "\n".join(report_lines), "images": all_charts}
+    return {
+        "result": "\n".join(report_lines),
+        "images": all_charts,
+        "mode": "distributed",
+        "nodes": [n["name"] for n in nodes],
+    }
 
 
 @app.route("/analyze/sheet", methods=["POST"])
@@ -1668,6 +1681,11 @@ def analyze_stream():
     def generate():
         model_output_parts = []
         try:
+            # 推送模式标识（单节点/分布式），供前端展示徽标
+            meta = {"type": "meta", "mode": "distributed" if distributed else "single",
+                    "nodes": [n["name"] for n in _distributed_nodes()]}
+            yield f"data: {json.dumps(meta, ensure_ascii=False)}\n\n"
+
             # 推送报告头
             header = "\n".join([
                 "=" * 60,
@@ -1690,6 +1708,8 @@ def analyze_stream():
                 for evt_type, chunk in _distributed_analysis_events(prep, question, model_output_parts):
                     if evt_type == "think":
                         yield f"data: {json.dumps({'type': 'think', 'content': chunk}, ensure_ascii=False)}\n\n"
+                    elif evt_type == "progress":
+                        yield f"data: {json.dumps({'type': 'progress', 'done': chunk['done'], 'total': chunk['total']}, ensure_ascii=False)}\n\n"
                     else:
                         yield f"data: {json.dumps({'type': 'text', 'content': chunk}, ensure_ascii=False)}\n\n"
             else:
@@ -1791,6 +1811,8 @@ def perform_analysis(files, question):
     return {
         "result": "\n".join(report_lines),
         "images": all_charts,
+        "mode": "single",
+        "nodes": [],
     }
 
 
