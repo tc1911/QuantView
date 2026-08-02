@@ -49,9 +49,14 @@ DEEPSEEK_MODEL = "deepseek-reasoner" if DEEPSEEK_THINKING else "deepseek-chat"
 _NODE_LIST = os.environ.get("DEEPANALYZE_NODES", "").strip()
 _NODE_TIMEOUT = float(os.environ.get("DEEPANALYZE_NODE_TIMEOUT", "600"))
 _SHEET_MAX_TOKENS = 8192  # 每个工作表任务的最大输出 token 数
-# Qwen3 等模型默认开启思考模式，思维链会泄漏进正文（"这是思考过程"式输出）；
-# 对本地 llama-server 一律禁用 thinking
-_NO_THINK_BODY = {"chat_template_kwargs": {"enable_thinking": False}}
+# 本地 llama-server 调优参数（仅 GGUF 路径附加，DeepSeek API 不受影响）：
+# - chat_template_kwargs.enable_thinking=false：Qwen3 思考模式会泄漏思维链进正文
+# - repeat_penalty / repeat_last_n：长输出重复循环防护（默认 1.0=关闭，模型会退化复读）
+_LOCAL_SERVER_BODY = {
+    "chat_template_kwargs": {"enable_thinking": False},
+    "repeat_penalty": 1.15,
+    "repeat_last_n": 512,
+}
 # 硬数字进入 prompt 的最大字符数（默认 12000，覆盖全部 11 张表约需 8500）
 # 太小会导致资金状况/经营预算等表被截断，模型误判"无数据"
 _HARD_NUMS_LIMIT = int(os.environ.get("DEEPANALYZE_HARD_NUMS_LIMIT", "12000"))
@@ -426,7 +431,9 @@ def get_model_and_tokenizer():
 
             _llama_proc = subprocess.Popen(
                 [server_bin, "-m", MODEL_PATH, "--port", str(port),
-                 "-ngl", "99", "-c", "65536", "--host", "127.0.0.1"],
+                 "-ngl", "99", "-c", "65536", "--host", "127.0.0.1",
+                 # 服务端禁用 Qwen3 思考模式（请求级 chat_template_kwargs 对部分模型无效）
+                 "--chat-template-kwargs", '{"enable_thinking": false}'],
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 text=True,
             )
@@ -1011,8 +1018,8 @@ def _run_inference(prompt, max_tokens=16384, stream=False):
         if isinstance(model, str) and model.startswith("llama-server:"):
             # 外部 llama-server → 走 API 路径（max_tokens 对齐本地模型）
             if stream:
-                return _call_deepseek_api_stream(prompt, max_tokens=65536, extra_body=_NO_THINK_BODY)
-            return _call_deepseek_api(prompt, max_tokens=65536, extra_body=_NO_THINK_BODY)
+                return _call_deepseek_api_stream(prompt, max_tokens=65536, extra_body=_LOCAL_SERVER_BODY)
+            return _call_deepseek_api(prompt, max_tokens=65536, extra_body=_LOCAL_SERVER_BODY)
 
         # ── 内嵌 llama-cpp-python ──
         def _gguf_llama_stream():
@@ -1022,7 +1029,8 @@ def _run_inference(prompt, max_tokens=16384, stream=False):
                     {"role": "user", "content": prompt},
                 ],
                 max_tokens=65536, temperature=0.7, top_p=0.9,
-                stream=True, chat_template_kwargs={"enable_thinking": False}):
+                stream=True, chat_template_kwargs={"enable_thinking": False},
+                repeat_penalty=1.15, repeat_last_n=512):
                 delta = chunk["choices"][0].get("delta", {})
                 text = delta.get("content", "")
                 if text:
@@ -1036,7 +1044,8 @@ def _run_inference(prompt, max_tokens=16384, stream=False):
                     {"role": "user", "content": prompt},
                 ],
                 max_tokens=65536, temperature=0.7, top_p=0.9,
-                chat_template_kwargs={"enable_thinking": False})
+                chat_template_kwargs={"enable_thinking": False},
+                repeat_penalty=1.15, repeat_last_n=512)
             output = result["choices"][0]["message"]["content"].strip()
         except Exception as e:
             raise RuntimeError(f"GGUF 推理出错: {str(e)}")
@@ -1214,6 +1223,7 @@ def _prepare_analysis_input_impl(valid_files, question):
 5. 硬数字中不存在的期别或指标不得出现。
 6. 只有当期数据的表，历史期列必须写"无数据"，禁止把当期值复制到历史期列、禁止从其他指标行取值。
 7. 图表数据不得用 0、重复值或其他指标行的数值填充缺失期别。
+8. 禁止连续重复输出相同或雷同的内容（如同一指标行重复列出多次）。
 """)
     prompt_parts.append("")
     prompt_parts.append(f"=== 用户问题 ===\n{question}")
