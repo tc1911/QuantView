@@ -1305,6 +1305,9 @@ console.log('[QuantView] JS loaded');
               renderMetaBadge(data);
               if (data.mode === 'distributed') {
                 midReset('等待任务分发…');
+                // 分布式：右栏不流式，完成时整体显示
+                var so = document.getElementById('streamOutput');
+                if (so) so.innerHTML = '<div style="color:var(--text-muted);padding:20px;text-align:center;">分项分析进行中…完成后在此显示完整报告</div>';
               } else {
                 midReset('单节点模式：无分节点工作内容');
               }
@@ -1397,8 +1400,8 @@ console.log('[QuantView] JS loaded');
                     persistSessions();
                   }, 2000);
                 }
-                // Throttle rendering: batch updates every 150ms
-                if (!window._renderTimer) {
+                // 单节点：流式渲染（150ms 节流）；分布式：右栏只累计，完成时整体显示
+                if (!(currentMeta && currentMeta.mode === 'distributed') && !window._renderTimer) {
                   window._renderTimer = setTimeout(function () {
                     window._renderTimer = null;
                     var so = document.getElementById('streamOutput');
@@ -1407,7 +1410,12 @@ console.log('[QuantView] JS loaded');
                 }
               }
 
-              var status = inThink ? ('思考中… (' + thinkText.length + ' 字)') : ('正在分析… (' + fullText.length + ' 字)');
+              var status;
+              if (currentMeta && currentMeta.mode === 'distributed') {
+                status = lastProgress ? ('分项分析中…（' + lastProgress.done + '/' + lastProgress.total + '）') : '分项分析中…';
+              } else {
+                status = inThink ? ('思考中… (' + thinkText.length + ' 字)') : ('正在分析… (' + fullText.length + ' 字)');
+              }
               document.getElementById('streamStatus').textContent = status;
               // 右栏跟随滚动（用户已上翻查看时不强制拉回）
               var rc = document.getElementById('colRight');
