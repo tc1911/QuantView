@@ -54,8 +54,11 @@ _SHEET_MAX_TOKENS = 8192  # 每个工作表任务的最大输出 token 数
 # 本地 llama-server 调优参数（仅 GGUF 路径附加，DeepSeek API 不受影响）：
 # - chat_template_kwargs.enable_thinking=false：Qwen3 思考模式会泄漏思维链进正文
 # - repeat_penalty / repeat_last_n：长输出重复循环防护（默认 1.0=关闭，模型会退化复读）
+# 本地模型思考模式开关（默认关：Qwen3 思考会泄漏进正文/拖慢输出；
+# 想开启时设 DEEPANALYZE_LOCAL_THINKING=true，前端会把 <think> 块折叠展示）
+_ENABLE_LOCAL_THINKING = os.environ.get("DEEPANALYZE_LOCAL_THINKING", "").lower() in ("1", "true", "yes")
 _LOCAL_SERVER_BODY = {
-    "chat_template_kwargs": {"enable_thinking": False},
+    "chat_template_kwargs": {"enable_thinking": _ENABLE_LOCAL_THINKING},
     "repeat_penalty": 1.15,
     "repeat_last_n": 512,
 }
@@ -439,7 +442,7 @@ def get_model_and_tokenizer():
                 [server_bin, "-m", MODEL_PATH, "--port", str(port),
                  "-ngl", "99", "-c", "65536", "--host", "127.0.0.1",
                  # 服务端禁用 Qwen3 思考模式（请求级 chat_template_kwargs 对部分模型无效）
-                 "--chat-template-kwargs", '{"enable_thinking": false}'],
+                 "--chat-template-kwargs", '{"enable_thinking": %s}' % ("true" if _ENABLE_LOCAL_THINKING else "false")],
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 text=True,
             )
@@ -1245,6 +1248,7 @@ def _prepare_analysis_input_impl(valid_files, question):
 15. 禁止使用 LaTeX 公式、$...$、引用块（> 符号）等格式，一律使用纯 Markdown 表格与文本。
 16. 禁止用省略号（...）、"依此类推"、"其余板块"等占位内容敷衍；每个板块必须完整写出数据概览、关键对比、变化分析、业务解读、策略建议、风险提示六个小节。
 17. 板块清单中的行号范围必须来自数据摘要中的真实行号，无法确定时写"—"，禁止编造行号区间。
+18. 直接输出报告正文，以『板块名称：』开头；禁止任何前言、思考过程、计划或解释性开头（如"好的""首先""我需要""让我们"等），第一个字必须是正文。
 """)
     prompt_parts.append("")
     prompt_parts.append(f"=== 用户问题 ===\n{question}")
@@ -1484,7 +1488,8 @@ def _build_sheet_prompt(label, summary, hard, question):
         "16. 本任务是单轮一次性任务，必须一次输出完整分析；禁止向用户提问、禁止'是否继续'式交互、禁止中途停止等待确认。",
         "17. 禁止使用 LaTeX 公式、$...$、引用块（> 符号）等格式，一律使用纯 Markdown 表格与文本。",
         "18. 禁止用省略号（...）、'依此类推'、'其余板块'等占位内容敷衍；本工作表分析必须完整写出六个小节。",
-        "19. 分析正文之后输出【图表数据】区块，每个分析模块至少一张图表，数据必须来自硬数字，禁止编造，格式：",
+        "19. 直接输出分析正文，禁止任何前言、思考过程、计划或解释性开头（如'好的''首先''我需要''让我们'等），第一个字必须是正文。",
+        "20. 分析正文之后输出【图表数据】区块，每个分析模块至少一张图表，数据必须来自硬数字，禁止编造，格式：",
         "```chartjson",
         '[{"title": "图表标题", "type": "bar/pie/line/bar_h", "data": {"指标1": 数值, "指标2": 数值}}]',
         "```",
