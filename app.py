@@ -1742,26 +1742,40 @@ def _distributed_analysis_events(prep, question, output_parts):
     """
     workers = _work_nodes()
     tasks = prep["tasks"]
-    print(f"[分布式] {len(tasks)} 个工作表任务（并行生成、保序投递），分发给 {len(workers)} 个节点（含主节点自身）")
+    print(f"[分布式] {len(tasks)} 个工作表任务（并行生成、保序投递、动态取任务），分发给 {len(workers)} 个节点（含主节点自身）")
     sections = []
     failures = 0
     done = 0
     total = len(tasks)
     # 每个任务独立的队列 + 任务顺序消费
     task_queues = {id(t): queue.Queue() for t in tasks}
-    task_nodes = {}
 
-    for i, t in enumerate(tasks):
-        node = workers[i % len(workers)]
-        task_nodes[id(t)] = node
-        threading.Thread(target=_stream_section_worker, args=(task_queues[id(t)], node, t), daemon=True).start()
+    # 动态取任务（work-stealing）：每节点一个 worker 线程，从共享池取下一个任务，
+    # 做完再取——快的节点自动多干活，慢的节点自然少接，负载实时均衡
+    task_pool = queue.Queue()
+    for i in range(len(tasks)):
+        task_pool.put(i)
+
+    def _node_worker(node):
+        while True:
+            try:
+                idx = task_pool.get_nowait()
+            except queue.Empty:
+                return
+            t = tasks[idx]
+            _stream_section_worker(task_queues[id(t)], node, t)
+
+    for node in workers:
+        threading.Thread(target=_node_worker, args=(node,), daemon=True).start()
 
     for t in tasks:
         q = task_queues[id(t)]
-        node = task_nodes[id(t)]
+        node = None
         parts = []
         while True:
             kind, t2, node2, arg = q.get()
+            if node is None:
+                node = node2
             if kind == "chunk":
                 evt, chunk = arg
                 if evt == "think":
@@ -1778,7 +1792,7 @@ def _distributed_analysis_events(prep, question, output_parts):
                 break
             else:  # done
                 break
-        if parts:
+        if parts and node is not None:
             sections.append((t["label"], node["name"], "".join(parts).strip()))
         done += 1
         yield ("progress", {"done": done, "total": total})
