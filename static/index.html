@@ -1967,6 +1967,9 @@ console.log('[QuantView] JS loaded');
     chatBusy = true;
     inp.value = '';
     chatAppend('user', q);
+    // 追问记录写入当前会话（随会话持久化到 localStorage，回放时恢复）
+    var active0 = getSession(activeSid);
+    if (active0) { active0.chat = active0.chat || []; active0.chat.push({ role: 'user', text: q }); persistSessions(); }
     var bubble = chatAppend('assistant', '');
     var full = '';
     var lastRender = 0;
@@ -1980,6 +1983,10 @@ console.log('[QuantView] JS loaded');
       var now = Date.now();
       if (now - lastRender > 200) { lastRender = now; renderBubble(); }
       else { setTimeout(renderBubble, 200); }
+    }
+    function saveChat() {
+      var s = getSession(activeSid);
+      if (s) { s.chat = s.chat || []; s.chat.push({ role: 'assistant', text: full || '（无回复）' }); persistSessions(); }
     }
 
     fetch('/analyze/followup', {
@@ -1995,7 +2002,7 @@ console.log('[QuantView] JS loaded');
       var buffer = '';
       function read() {
         return reader.read().then(function (res) {
-          if (res.done) { renderBubble(); chatBusy = false; return; }
+          if (res.done) { renderBubble(); chatBusy = false; saveChat(); return; }
           buffer += decoder.decode(res.value, { stream: true });
           var lines = buffer.split('\n');
           buffer = lines.pop();
@@ -2013,6 +2020,7 @@ console.log('[QuantView] JS loaded');
       full = '⚠️ ' + (err.message || '网络错误');
       renderBubble();
       chatBusy = false;
+      saveChat();
     });
   }
 
@@ -2083,6 +2091,23 @@ console.log('[QuantView] JS loaded');
       } else {
         midReset('单节点模式：无分节点工作内容');
       }
+    }
+    // 追问会话恢复：meta.session 存在即可继续追问（服务端会话已落盘，重启后仍有效）
+    chatSessionId = (s.meta && s.meta.session) || null;
+    chatBusy = false;
+    var cp2 = document.getElementById('chatPanel');
+    var ct2 = document.getElementById('chatThread');
+    if (ct2) ct2.innerHTML = '';
+    if (chatSessionId && cp2) {
+      (s.chat || []).forEach(function (m) {
+        var d2 = document.createElement('div');
+        d2.className = 'chat-msg ' + (m.role === 'user' ? 'user' : 'assistant');
+        if (m.text) d2.innerHTML = renderMarkdown(m.text);
+        ct2.appendChild(d2);
+      });
+      cp2.classList.add('active');
+    } else if (cp2) {
+      cp2.classList.remove('active');
     }
     resultSection.scrollIntoView({ behavior: 'smooth', block: 'start' });
     renderSessionList();

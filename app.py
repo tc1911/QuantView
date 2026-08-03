@@ -537,6 +537,7 @@ def analyze():
     try:
         output = perform_analysis(fresh_files, question)
         _SESSIONS[session_id]["report"] = output["result"]
+        _persist_session(session_id)
         return jsonify({
             "result": output["result"],
             "images": output.get("images", []),
@@ -1549,8 +1550,61 @@ def analyze_sheet_stream():
 
 
 # ── 二次追问会话（像聊天一样继续提问） ──
-_SESSIONS = {}
 _MAX_SESSIONS = 20
+_SESSIONS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sessions")
+
+
+def _session_path(session_id):
+    return os.path.join(_SESSIONS_DIR, session_id + ".json")
+
+
+def _persist_session(session_id):
+    """把会话写入磁盘（服务重启后追问记录仍在，可直接继续）。"""
+    sess = _SESSIONS.get(session_id)
+    if not sess:
+        return
+    try:
+        os.makedirs(_SESSIONS_DIR, exist_ok=True)
+        with open(_session_path(session_id), "w", encoding="utf-8") as f:
+            json.dump({
+                "session": session_id,
+                "context": sess.get("context", ""),
+                "turns": sess.get("turns", []),
+                "created": sess.get("created", time.time()),
+                "report": sess.get("report", ""),
+            }, f, ensure_ascii=False)
+    except Exception as e:
+        print(f"[追问] 会话持久化失败: {e}")
+
+
+def _load_followup_sessions():
+    """启动时从磁盘恢复追问会话，只保留最近 _MAX_SESSIONS 个。"""
+    out = {}
+    try:
+        if os.path.isdir(_SESSIONS_DIR):
+            for fn in os.listdir(_SESSIONS_DIR):
+                if not fn.endswith(".json"):
+                    continue
+                try:
+                    with open(os.path.join(_SESSIONS_DIR, fn), encoding="utf-8") as f:
+                        d = json.load(f)
+                    if d.get("session"):
+                        out[d["session"]] = {
+                            "context": d.get("context", ""),
+                            "turns": d.get("turns", []),
+                            "created": d.get("created", 0),
+                            "report": d.get("report", ""),
+                        }
+                except Exception:
+                    continue
+    except Exception:
+        pass
+    for sid in sorted(out, key=lambda k: out[k].get("created", 0))[:max(0, len(out) - _MAX_SESSIONS)]:
+        out.pop(sid)
+    return out
+
+
+_SESSIONS = _load_followup_sessions()
 
 
 def _build_followup_context(file_buffers):
@@ -1579,7 +1633,7 @@ def _build_followup_context(file_buffers):
 
 
 def _new_followup_session(file_buffers):
-    """创建追问会话（内存存储，最多保留 _MAX_SESSIONS 个）。"""
+    """创建追问会话（内存 + 磁盘持久化，最多保留 _MAX_SESSIONS 个）。"""
     session_id = os.urandom(8).hex()
     try:
         ctx = _build_followup_context(file_buffers)
@@ -1590,6 +1644,11 @@ def _new_followup_session(file_buffers):
     if len(_SESSIONS) > _MAX_SESSIONS:
         oldest = min(_SESSIONS, key=lambda k: _SESSIONS[k]["created"])
         _SESSIONS.pop(oldest, None)
+        try:
+            os.remove(_session_path(oldest))
+        except OSError:
+            pass
+    _persist_session(session_id)
     return session_id
 
 
@@ -1633,6 +1692,7 @@ def analyze_followup():
     # 历史截断：保留最近 8 轮
     if len(sess["turns"]) > 16:
         sess["turns"] = sess["turns"][-16:]
+    _persist_session(session_id)
 
     def generate():
         output = []
@@ -1654,6 +1714,7 @@ def analyze_followup():
                 sess["turns"].append(("assistant", "".join(output)))
                 if len(sess["turns"]) > 16:
                     sess["turns"] = sess["turns"][-16:]
+                _persist_session(session_id)
 
     return Response(
         stream_with_context(generate()),
@@ -1750,6 +1811,7 @@ def analyze_stream():
 
             # 报告存入追问会话，供"接着问/修正"时引用
             _SESSIONS[session_id]["report"] = full_output
+            _persist_session(session_id)
 
             # 推送报告尾
             footer = "\n\n" + "-" * 40 + "\n报告生成完毕\n" + "-" * 40

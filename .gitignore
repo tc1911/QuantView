@@ -18,3 +18,9 @@ fonts/
 # 本地推理二进制（如 llama-server.exe）
 llama-server.exe
 llama-server
+
+# 追问会话持久化（含数据背景与对话记录，不入库）
+sessions/
+
+# llama-server 运行日志
+llama-server.log
