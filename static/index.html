@@ -1378,26 +1378,29 @@ console.log('[QuantView] JS loaded');
 
               // 中栏：节点工作内容（必须用原始内容检测——思考禁用时
               // 正文会被下方 inThink 缓冲区吞掉，导致中栏收不到小节）
-              if (currentMeta && currentMeta.split) {
-                var mSec = chunk.match(/^### 工作表「(.+?)」分析（节点：(.+?)）$/m);
-                var mOv = chunk.match(/^## 总览与综合结论/m);
-                if (mSec) {
-                  midCurrent = midAddCard(mSec[1], mSec[2], chunk.replace(/^### 工作表「(.+?)」分析（节点：(.+?)）\n/m, ''));
-                  midRender();
-                } else if (mOv) {
-                  midCurrent = midAddCard('总览与综合结论', '主节点', chunk.replace(/^## 总览与综合结论（主节点生成）\n/m, ''));
-                  midRender();
-                } else if (midCurrent) {
-                  midCurrent.raw += chunk;
-                  midCurrent.dirty = true;
-                  if (!window._midTimer) {
-                    window._midTimer = setTimeout(function () {
-                      window._midTimer = null;
-                      midRender();
-                    }, 300);
+              // try/catch：渲染异常不掐断读流
+              try {
+                if (currentMeta && currentMeta.split) {
+                  var mSec = chunk.match(/^### 工作表「(.+?)」分析（节点：(.+?)）$/m);
+                  var mOv = chunk.match(/^## 总览与综合结论/m);
+                  if (mSec) {
+                    midCurrent = midAddCard(mSec[1], mSec[2], chunk.replace(/^### 工作表「(.+?)」分析（节点：(.+?)）\n/m, ''));
+                    midRender();
+                  } else if (mOv) {
+                    midCurrent = midAddCard('总览与综合结论', '主节点', chunk.replace(/^## 总览与综合结论（主节点生成）\n/m, ''));
+                    midRender();
+                  } else if (midCurrent) {
+                    midCurrent.raw += chunk;
+                    midCurrent.dirty = true;
+                    if (!window._midTimer) {
+                      window._midTimer = setTimeout(function () {
+                        window._midTimer = null;
+                        midRender();
+                      }, 300);
+                    }
                   }
                 }
-              }
+              } catch (e) { console.error('[stream] 中栏渲染异常', e); }
 
               if (inThink) {
                 var hasThinkMarker = chunk.indexOf('<think') !== -1;

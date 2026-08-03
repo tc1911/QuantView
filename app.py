@@ -1496,7 +1496,10 @@ def analyze_sheet_stream():
             print(f"[节点任务] 失败(流式): {label} 耗时 {time.time()-t0:.1f}s 错误: {e}")
             yield f"data: {json.dumps({'type': 'error', 'content': str(e)}, ensure_ascii=False)}\n\n"
         finally:
-            yield "data: {\"type\": \"done\"}\n\n"
+            try:
+                yield "data: {\"type\": \"done\"}\n\n"
+            except BaseException:
+                pass  # 客户端断开（GeneratorExit）时优雅关闭
 
     return Response(
         stream_with_context(generate()),
@@ -1603,7 +1606,10 @@ def analyze_followup():
         except Exception as e:
             yield f"data: {json.dumps({'type': 'error', 'content': str(e)}, ensure_ascii=False)}\n\n"
         finally:
-            yield "data: {\"type\": \"done\"}\n\n"
+            try:
+                yield "data: {\"type\": \"done\"}\n\n"
+            except BaseException:
+                pass  # 客户端断开（GeneratorExit）时优雅关闭
             if output:
                 sess["turns"].append(("assistant", "".join(output)))
                 if len(sess["turns"]) > 16:
@@ -1728,7 +1734,10 @@ def analyze_stream():
             print(f"[Stream Error] {traceback.format_exc()}")
             yield f"data: {json.dumps({'type': 'error', 'content': str(e)}, ensure_ascii=False)}\n\n"
         finally:
-            yield "data: {\"type\": \"done\"}\n\n"
+            try:
+                yield "data: {\"type\": \"done\"}\n\n"
+            except BaseException:
+                pass  # 客户端断开（GeneratorExit）时优雅关闭
 
     return Response(
         stream_with_context(generate()),
