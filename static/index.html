@@ -1176,9 +1176,11 @@ console.log('[QuantView] JS loaded');
       var q2 = questionInput.value.trim();
       if (!q2) { showError('请输入追问内容'); return; }
       questionInput.value = '';
+      diagLog('点击追问按钮 → chatSend: ' + q2);
       chatSend(q2);
       return;
     }
+    diagLog('按钮点击但非追问分支 followup=' + submitBtn.dataset.followup + ' session=' + !!chatSessionId + ' cur=' + !!currentSession);
     if (selectedFiles.length === 0) {
       showError('请先选择要分析的数据文件');
       return;
@@ -1914,6 +1916,18 @@ console.log('[QuantView] JS loaded');
     if (inp) inp.value = '';
   }
 
+  // 临时诊断条：固定在页面顶部，任何情况下都能看到追问各步骤的执行情况
+  function diagLog(msg) {
+    var el = document.getElementById('diagStrip');
+    if (!el) {
+      el = document.createElement('div');
+      el.id = 'diagStrip';
+      el.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:99999;background:#111;color:#0f0;font:12px/1.5 monospace;padding:4px 8px;white-space:pre-wrap;';
+      document.body.appendChild(el);
+    }
+    el.textContent = new Date().toISOString().slice(11, 19) + ' ' + msg;
+  }
+
   function chatSend(optQ) {
     var inp = document.getElementById('chatInput');
     var q = (optQ === undefined ? inp.value : optQ).trim();
@@ -1926,6 +1940,10 @@ console.log('[QuantView] JS loaded');
       return;
     }
     chatBusy = true;
+    diagLog('chatSend q=' + q + ' session=' + String(chatSessionId).slice(0, 8)
+      + ' panel=' + !!document.getElementById('chatPanel')
+      + ' thread=' + (document.getElementById('chatThread') ? document.getElementById('chatThread').children.length : -1)
+      + ' panelVisible=' + (function () { var p = document.getElementById('chatPanel'); return !!(p && p.offsetParent !== null); })());
     // 确保追问面板可见并滚动到输入框（导入会话/回车发送等路径可能未在视口内）
     var cpn = document.getElementById('chatPanel');
     if (cpn) { cpn.classList.add('active'); cpn.scrollIntoView({ behavior: 'smooth', block: 'nearest' }); }
@@ -1980,12 +1998,14 @@ console.log('[QuantView] JS loaded');
       var reader = r.body.getReader();
       var decoder = new TextDecoder();
       var buffer = '';
+      var chunkCount = 0;
       function read() {
         return reader.read().then(function (res) {
           if (res.done) {
             if (slowTimer) { clearTimeout(slowTimer); slowTimer = null; }
             if (!full) { full = '（无回复：模型未返回内容，请重试）'; }
             renderBubble(); chatBusy = false; recordAssistant();
+            diagLog('done: full=' + full.length + ' 块数=' + chunkCount + ' bubbleKids=' + (bubble.children.length + (bubble.innerHTML ? 1 : 0)));
             return;
           }
           buffer += decoder.decode(res.value, { stream: true });
@@ -1994,7 +2014,7 @@ console.log('[QuantView] JS loaded');
           lines.forEach(function (line) {
             if (!line.startsWith('data: ')) return;
             var d; try { d = JSON.parse(line.substring(6)); } catch (e) { return; }
-            if (d.type === 'text') { full += d.content; gotChunk = true; scheduleRender(); }
+            if (d.type === 'text') { full += d.content; gotChunk = true; chunkCount++; if (chunkCount % 20 === 0) { diagLog('已收 ' + chunkCount + ' 块 full=' + full.length); } scheduleRender(); }
             else if (d.type === 'error') { full += '\n⚠️ ' + d.content; }
           });
           return read();
@@ -2007,6 +2027,7 @@ console.log('[QuantView] JS loaded');
       renderBubble();
       chatBusy = false;
       recordAssistant();
+      diagLog('catch: ' + err.message);
     });
   }
 
