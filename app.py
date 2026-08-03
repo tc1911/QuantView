@@ -1417,24 +1417,31 @@ def _prepare_distributed_input_impl(valid_files, question):
     }
 
 
-def _stream_section_worker(q, node, t):
+def _stream_section_worker(q, node, t, stop_event):
     """流式工作表任务线程：把文本块逐个放入队列。
 
     队列元素: ("chunk", t, node, evt_type, chunk) / ("error", t, node, msg) / ("done", t, node, None)
     首个文本块自带小节标题头（### 工作表「x」分析（节点：y））。
+    stop_event：客户端断开/分析中止时置位，worker 在下个文本块边界提前终止，释放模型。
     """
     first = True
     try:
         if node["url"] is None:
-            # 主节点本地任务：直接流式推理
-            for evt, chunk in _run_inference(t["prompt"], max_tokens=_SHEET_MAX_TOKENS, stream=True):
-                if evt == "think":
-                    q.put(("chunk", t, node, ("think", chunk)))
-                else:
-                    if first:
-                        chunk = f"\n\n### 工作表「{t['label']}」分析（节点：{node['name']}）\n\n" + chunk
-                        first = False
-                    q.put(("chunk", t, node, ("text", chunk)))
+            # 主节点本地任务：直接流式推理；中止时关闭推理生成器，释放底层连接
+            gen = _run_inference(t["prompt"], max_tokens=_SHEET_MAX_TOKENS, stream=True)
+            try:
+                for evt, chunk in gen:
+                    if stop_event.is_set():
+                        break
+                    if evt == "think":
+                        q.put(("chunk", t, node, ("think", chunk)))
+                    else:
+                        if first:
+                            chunk = f"\n\n### 工作表「{t['label']}」分析（节点：{node['name']}）\n\n" + chunk
+                            first = False
+                        q.put(("chunk", t, node, ("text", chunk)))
+            finally:
+                gen.close()
         else:
             # 加速节点任务：SSE 流式读取（旧版节点无流式端点时回退非流式）
             try:
@@ -1447,6 +1454,8 @@ def _stream_section_worker(q, node, t):
                 )
                 with urllib.request.urlopen(req, timeout=_NODE_TIMEOUT) as resp:
                     for line in resp:
+                        if stop_event.is_set():
+                            break  # 客户端断开，停止转发该节点任务
                         line = line.decode("utf-8").strip()
                         if not line.startswith("data: "):
                             continue
@@ -1480,14 +1489,16 @@ def _stream_section_worker(q, node, t):
         q.put(("done", t, node, None))
 
 
-def _distributed_analysis_events(prep, question, output_parts):
+def _distributed_analysis_events(prep, question, output_parts, stop_event=None):
     """分布式流式分析：并行生成、保序投递 → 主节点生成总览。
 
     各表在后台并行生成（线程池），但投递严格按任务顺序：
     每张表的文本块连续流式输出完，才开始下一张表——保证最终报告
     各表完整不交错。yield ("think"|"text"|"progress", chunk)，
     所有文本块累计进 output_parts 供图表提取。
+    stop_event：客户端断开时置位，worker 提前终止，避免模型空转。
     """
+    stop_event = stop_event or threading.Event()
     workers = _work_nodes()
     tasks = prep["tasks"]
     print(f"[分布式] {len(tasks)} 个工作表任务（并行生成、保序投递、动态取任务），分发给 {len(workers)} 个节点（含主节点自身）")
@@ -1505,13 +1516,13 @@ def _distributed_analysis_events(prep, question, output_parts):
         task_pool.put(i)
 
     def _node_worker(node):
-        while True:
+        while not stop_event.is_set():
             try:
                 idx = task_pool.get_nowait()
             except queue.Empty:
                 return
             t = tasks[idx]
-            _stream_section_worker(task_queues[id(t)], node, t)
+            _stream_section_worker(task_queues[id(t)], node, t, stop_event)
 
     for node in workers:
         threading.Thread(target=_node_worker, args=(node,), daemon=True).start()
@@ -1927,6 +1938,8 @@ def analyze_stream():
 
     def generate():
         model_output_parts = []
+        # 客户端断开/分析中止时置位，后台 worker 提前终止，避免模型空转
+        stop_event = threading.Event()
         try:
             # 推送模式标识（单节点/分布式）+ 追问会话 id，供前端展示徽标
             # split=true：一律按工作表逐表处理（单节点=主节点自己逐表）
@@ -1954,7 +1967,7 @@ def analyze_stream():
             yield f"data: {json.dumps({'type': 'text', 'content': header}, ensure_ascii=False)}\n\n"
 
             # 流式推理：逐表处理（有加速节点时并行分发 + 保序投递；单节点时主节点自己逐表）
-            for evt_type, chunk in _distributed_analysis_events(prep, question, model_output_parts):
+            for evt_type, chunk in _distributed_analysis_events(prep, question, model_output_parts, stop_event):
                 if evt_type == "think":
                     yield f"data: {json.dumps({'type': 'think', 'content': chunk}, ensure_ascii=False)}\n\n"
                 elif evt_type == "progress":
@@ -2001,6 +2014,8 @@ def analyze_stream():
             print(f"[Stream Error] {traceback.format_exc()}")
             yield f"data: {json.dumps({'type': 'error', 'content': str(e)}, ensure_ascii=False)}\n\n"
         finally:
+            # 无论正常完成还是客户端断开，都通知 worker 停止，释放模型
+            stop_event.set()
             try:
                 yield "data: {\"type\": \"done\"}\n\n"
             except BaseException:
