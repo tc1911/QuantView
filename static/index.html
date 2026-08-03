@@ -2181,6 +2181,35 @@ console.log('[QuantView] JS loaded');
       var ob = document.querySelector('.output-block');
       var html = ob ? (ob.innerHTML || '') : '';
       if (!html) { showError('无内容可导出'); return; }
+      // 把 chartjson 代码块替换为已渲染的图表图片（按图表标题匹配，匹配不到的块直接移除）
+      var images = [];
+      var cur = getSession(activeSid);
+      if (cur && cur.images) images = cur.images;
+      if (!images.length) {
+        chartsContainer.querySelectorAll('.chart-item').forEach(function (it) {
+          var im = it.querySelector('img');
+          if (im) images.push([im.alt || '图表', im.src]);
+        });
+      }
+      html = html.replace(/<pre><code class="lang-chartjson">[\s\S]*?<\/code><\/pre>/g, function (m) {
+        var raw = m.replace(/^<pre><code class="lang-chartjson">/, '').replace(/<\/code><\/pre>$/, '')
+                   .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
+        var specs = null;
+        try { specs = JSON.parse(raw); }
+        catch (e) {
+          try { specs = JSON.parse(raw.replace(/,\s*([\]}])/g, '$1')); }
+          catch (e2) { specs = null; }
+        }
+        if (!specs || !specs.length) return '';
+        var imgs = [];
+        specs.forEach(function (sp) {
+          if (!sp || !sp.title) return;
+          for (var i = 0; i < images.length; i++) {
+            if (images[i][0] === sp.title) { imgs.push('<img src="' + images[i][1] + '">'); break; }
+          }
+        });
+        return imgs.join('\n');
+      });
       wordBtn.textContent = '生成中...'; wordBtn.disabled = true;
       fetch('/export/docx', {
         method: 'POST',

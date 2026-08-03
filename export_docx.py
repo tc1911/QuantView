@@ -14,7 +14,7 @@ import re
 
 try:
     from docx import Document
-    from docx.shared import Pt
+    from docx.shared import Pt, Inches
     from docx.enum.text import WD_ALIGN_PARAGRAPH
 except ImportError:
     print("错误: 需要 python-docx 库，请执行: pip install python-docx")
@@ -46,12 +46,28 @@ def html_to_docx(html_content, title="分析报告"):
     tr_re = re.compile(r'<tr[^>]*>(.*?)</tr>', re.DOTALL)
     td_re = re.compile(r'<t[dh][^>]*>(.*?)</t[dh]>', re.DOTALL)
 
-    # 分段处理：先分割 HTML 块
-    blocks = re.split(r'(<(?:h[1-4]|table|p|hr|ul|ol|li|pre|blockquote)[^>]*>.*?</(?:h[1-4]|table|p|hr|ul|ol|li|pre|blockquote)>)',
+    # 分段处理：先分割 HTML 块（img 是自闭合标签，单独作为一块）
+    blocks = re.split(r'(<(?:h[1-4]|table|p|hr|ul|ol|li|pre|blockquote)[^>]*>.*?</(?:h[1-4]|table|p|hr|ul|ol|li|pre|blockquote)>|<img[^>]*/?>)',
                       html_content, flags=re.DOTALL)
 
     for block in blocks:
         if not block or not block.strip():
+            continue
+
+        # 图片（base64 data URL → 嵌入 Word）
+        img_match = re.match(r'<img[^>]*src="data:image/(?:png|jpeg|jpg);base64,([^"]+)"[^>]*>', block.strip())
+        if img_match:
+            try:
+                import base64 as _b64
+                img_data = _b64.b64decode(img_match.group(1))
+                pic = doc.add_picture(io.BytesIO(img_data), width=Inches(6))
+                doc.paragraphs[-1].alignment = WD_ALIGN_PARAGRAPH.CENTER
+            except Exception:
+                pass
+            continue
+
+        # 代码块（chartjson 等）：不导出为纯文本，避免 JSON 原文进文档
+        if re.match(r'<pre[^>]*>', block.strip()):
             continue
 
         # 表格
