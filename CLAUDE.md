@@ -36,6 +36,7 @@ Useful deps: `flask pandas matplotlib numpy` (required); `openpyxl` (required �
 | `DEEPANALYZE_TEMPERATURE` | 采样温度（默认 0.5；报告为确定性任务，低温度降低单次跑飞/对话式输出概率） |
 | `DEEPANALYZE_HEADLESS` | `1/true` → 无头加速节点模式：不提供 Web 界面（`GET /` 返回 404 提示），仅保留 `/analyze/sheet` 任务接口，控制台逐任务打印收到/完成/耗时 |
 | `DEEPANALYZE_CONTEXT` | llama-server 上下文长度（默认 65536）。同机多实例时加速节点建议 32768 省内存（32B 模型 64K KV 缓存约 16GB） |
+| `DEEPANALYZE_NGL` | llama-server GPU 显存层数（默认 99 全量卸载）。显存不足报 `ErrorOutOfDeviceMemory`/KV 缓存分配失败时调低（如 60/30），0 = 纯 CPU |
 
 ## Architecture
 

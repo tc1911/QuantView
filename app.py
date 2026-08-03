@@ -403,9 +403,11 @@ def get_model_and_tokenizer():
         # llama-server 输出写入日志文件（不能用 PIPE：没人读取会堵塞进程，且超时后无法看到原因）
         _log_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "llama-server.log")
         _logf = open(_log_path, "a", encoding="utf-8", errors="replace")
+        # GPU 显存层数：默认全量卸载；显存不足时可调低（如 DEEPANALYZE_NGL=60/0）
+        _ngl = os.environ.get("DEEPANALYZE_NGL", "99")
         _llama_proc = subprocess.Popen(
             [server_bin, "-m", MODEL_PATH, "--port", str(port),
-             "-ngl", "99", "-c", str(_CONTEXT), "--host", "127.0.0.1",
+             "-ngl", _ngl, "-c", str(_CONTEXT), "--host", "127.0.0.1",
              # 服务端禁用 Qwen3 思考模式（请求级 chat_template_kwargs 对部分模型无效）
              "--chat-template-kwargs", '{"enable_thinking": %s}' % ("true" if _ENABLE_LOCAL_THINKING else "false")],
             stdout=_logf, stderr=subprocess.STDOUT,
