@@ -1498,17 +1498,19 @@ console.log('[QuantView] JS loaded');
               chartsContainer.querySelectorAll('.chart-item img').forEach(function (img) {
                 currentSession.images.push([img.alt || '图表', img.src]);
               });
+              loadingContainer.classList.remove('active');
+              submitBtn.disabled = false;
+              submitBtn.classList.remove('btn-stop');
               // 分析完成 → 显示追问面板（会话有效时），主按钮切换为"追问"
+              // （必须先复位按钮，再 setSubmitMode，否则会被上面的复位覆盖回"开始分析"）
               var cp = document.getElementById('chatPanel');
               if (cp && chatSessionId) {
                 cp.classList.add('active');
                 document.getElementById('chatInput').focus();
                 setSubmitMode(true);
+              } else {
+                setSubmitMode(false);
               }
-              loadingContainer.classList.remove('active');
-              submitBtn.disabled = false;
-              submitBtn.classList.remove('btn-stop');
-              submitBtn.innerHTML = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg> 开始分析';
               return;
             }
           });
