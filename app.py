@@ -1042,38 +1042,40 @@ def _call_deepseek_api_stream(prompt, max_tokens=16384, extra_body=None):
 
     chunk_count = 0
     think_count = 0
-    for line_bytes in resp:
-        try:
-            line = line_bytes.decode("utf-8").strip()
-        except Exception:
-            continue
-
-        if not line:
-            continue
-        if line.startswith("data: "):
-            data_str = line[6:]
-            if data_str == "[DONE]":
-                break
+    try:
+        for line_bytes in resp:
             try:
-                data = json.loads(data_str)
-                delta = data.get("choices", [{}])[0].get("delta", {})
-
-                # 思考内容 (deepseek-reasoner)
-                reasoning = delta.get("reasoning_content", "")
-                if reasoning:
-                    think_count += 1
-                    yield ("think", reasoning)
-
-                # 正式输出
-                content = delta.get("content", "")
-                if content:
-                    chunk_count += 1
-                    yield ("text", content)
-
-            except json.JSONDecodeError:
+                line = line_bytes.decode("utf-8").strip()
+            except Exception:
                 continue
 
-    resp.close()
+            if not line:
+                continue
+            if line.startswith("data: "):
+                data_str = line[6:]
+                if data_str == "[DONE]":
+                    break
+                try:
+                    data = json.loads(data_str)
+                    delta = data.get("choices", [{}])[0].get("delta", {})
+
+                    # 思考内容 (deepseek-reasoner)
+                    reasoning = delta.get("reasoning_content", "")
+                    if reasoning:
+                        think_count += 1
+                        yield ("think", reasoning)
+
+                    # 正式输出
+                    content = delta.get("content", "")
+                    if content:
+                        chunk_count += 1
+                        yield ("text", content)
+
+                except json.JSONDecodeError:
+                    continue
+    finally:
+        # 生成器被 close()（客户端断开取消推理）时也立即断开底层连接，让 llama-server 停止生成
+        resp.close()
     print(f"[api] 流式推理完成 — {think_count} 个思考块, {chunk_count} 个文本块")
 
 
@@ -1637,13 +1639,23 @@ def _distributed_analysis_events(prep, question, output_parts, stop_event=None):
     intro = "\n\n---\n\n## 总览与综合结论（主节点生成）\n\n"
     output_parts.append(intro)
     yield ("text", intro)
-    for evt, chunk in _run_inference(_build_overview_prompt(question, sections), max_tokens=16384, stream=True):
-        if evt == "think":
-            yield ("think", chunk)
-        else:
-            chunk = calc_streamer.feed(chunk)
-            output_parts.append(chunk)
-            yield ("text", chunk)
+    ov_gen = _run_inference(_build_overview_prompt(question, sections), max_tokens=16384, stream=True)
+    try:
+        for evt, chunk in ov_gen:
+            if stop_event.is_set():
+                break  # 客户端断开：提前终止，释放模型
+            if evt == "think":
+                yield ("think", chunk)
+            else:
+                chunk = calc_streamer.feed(chunk)
+                output_parts.append(chunk)
+                yield ("text", chunk)
+    finally:
+        # 无论正常结束还是客户端断开，都关闭推理生成器，避免模型空转占用
+        try:
+            ov_gen.close()
+        except BaseException:
+            pass
 
     # 冲刷尾部暂存（未闭合标记的兜底替换）
     tail = calc_streamer.flush()
@@ -1772,8 +1784,9 @@ def analyze_sheet_stream():
     t0 = time.time()
 
     def generate():
+        gen = _run_inference(prompt, max_tokens=max_tokens, stream=True)
         try:
-            for evt_type, chunk in _run_inference(prompt, max_tokens=max_tokens, stream=True):
+            for evt_type, chunk in gen:
                 if evt_type == "think":
                     yield f"data: {json.dumps({'type': 'think', 'content': chunk}, ensure_ascii=False)}\n\n"
                 else:
@@ -1783,6 +1796,11 @@ def analyze_sheet_stream():
             print(f"[节点任务] 失败(流式): {label} 耗时 {time.time()-t0:.1f}s 错误: {e}")
             yield f"data: {json.dumps({'type': 'error', 'content': str(e)}, ensure_ascii=False)}\n\n"
         finally:
+            # 客户端断开（GeneratorExit）时关闭推理生成器，释放模型避免空转
+            try:
+                gen.close()
+            except BaseException:
+                pass
             try:
                 yield "data: {\"type\": \"done\"}\n\n"
             except BaseException:
@@ -1947,8 +1965,9 @@ def analyze_followup():
 
     def generate():
         output = []
+        gen = _run_inference(_build_followup_prompt(sess), max_tokens=8192, stream=True)
         try:
-            for evt, chunk in _run_inference(_build_followup_prompt(sess), max_tokens=8192, stream=True):
+            for evt, chunk in gen:
                 if evt == "think":
                     yield f"data: {json.dumps({'type': 'think', 'content': chunk}, ensure_ascii=False)}\n\n"
                 else:
@@ -1957,6 +1976,11 @@ def analyze_followup():
         except Exception as e:
             yield f"data: {json.dumps({'type': 'error', 'content': str(e)}, ensure_ascii=False)}\n\n"
         finally:
+            # 客户端断开（GeneratorExit）/异常时关闭推理生成器，释放模型避免空转占用
+            try:
+                gen.close()
+            except BaseException:
+                pass
             try:
                 yield "data: {\"type\": \"done\"}\n\n"
             except BaseException:
