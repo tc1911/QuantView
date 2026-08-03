@@ -1939,7 +1939,7 @@ def _build_followup_prompt(sess):
     ]
     for role, content in sess["turns"][:-1]:
         who = "用户" if role == "user" else "助手"
-        parts.append(f"{who}：{content[:1000]}")
+        parts.append(f"{who}：{content[:600]}")
     parts.append("")
     parts.append(f"=== 最新问题 ===\n{sess['turns'][-1][1]}")
     return "\n".join(parts)
@@ -1960,8 +1960,8 @@ def analyze_followup():
 
     sess["turns"].append(("user", question))
     # 历史截断：保留最近 8 轮
-    if len(sess["turns"]) > 16:
-        sess["turns"] = sess["turns"][-16:]
+    if len(sess["turns"]) > 12:
+        sess["turns"] = sess["turns"][-12:]
     _persist_session(session_id)
 
     def generate():
@@ -1988,8 +1988,8 @@ def analyze_followup():
                 pass  # 客户端断开（GeneratorExit）时优雅关闭
             if output:
                 sess["turns"].append(("assistant", "".join(output)))
-                if len(sess["turns"]) > 16:
-                    sess["turns"] = sess["turns"][-16:]
+                if len(sess["turns"]) > 12:
+                    sess["turns"] = sess["turns"][-12:]
                 _persist_session(session_id)
 
     return Response(
