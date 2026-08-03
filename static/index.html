@@ -1355,6 +1355,8 @@ console.log('[QuantView] JS loaded');
       var decoder = new TextDecoder();
       var buffer = '';
       var gotDone = false;
+      var diagChunks = 0;
+      diagLog('分析流已建立，开始接收…');
       // 空闲监测：模型预填充/思考阶段可能几十秒无事件，显示"已 N 秒无更新"避免误判断开
       var lastEventTime = Date.now();
       var idleTimer = setInterval(function () {
@@ -1365,6 +1367,9 @@ console.log('[QuantView] JS loaded');
             st.textContent = '模型预填充中…（已 ' + Math.round(idle / 1000) + ' 秒无更新，属正常现象）';
             st.style.color = idle > 120000 ? 'var(--warning)' : '';
           }
+        }
+        if (idle % 30000 < 5000) {
+          diagLog('空闲 ' + Math.round(idle / 1000) + 's：已收 ' + diagChunks + ' 块，fullText=' + (typeof fullText !== 'undefined' ? fullText.length : 0));
         }
       }, 5000);
 
@@ -1397,6 +1402,7 @@ console.log('[QuantView] JS loaded');
             var stEl = document.getElementById('streamStatus');
             if (stEl) stEl.style.color = '';
 
+            if (data.type === 'text') { diagChunks++; if (diagChunks % 100 === 0) { diagLog('已收 ' + diagChunks + ' 块 fullText=' + fullText.length); } }
             if (data.type === 'meta') {
               currentMeta = data;
               chatSessionId = data.session || null;
@@ -1561,6 +1567,7 @@ console.log('[QuantView] JS loaded');
                 mbar.style.width = '100%';
               }
               document.getElementById('streamStatus').textContent = '分析完成';
+              diagLog('done：总块数=' + diagChunks + ' fullText=' + fullText.length);
               renderResult(finalOut);
               // 收集当前会话（报告/思考/图表/元信息），供导出 JSON
               currentSession = {
