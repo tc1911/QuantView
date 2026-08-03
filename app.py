@@ -400,14 +400,18 @@ def get_model_and_tokenizer():
         print(f"[GGUF] 启动 llama-server: {server_bin}")
         print(f"[GGUF] 端口: {port}, 模型: {MODEL_PATH}")
 
+        # llama-server 输出写入日志文件（不能用 PIPE：没人读取会堵塞进程，且超时后无法看到原因）
+        _log_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "llama-server.log")
+        _logf = open(_log_path, "a", encoding="utf-8", errors="replace")
         _llama_proc = subprocess.Popen(
             [server_bin, "-m", MODEL_PATH, "--port", str(port),
              "-ngl", "99", "-c", str(_CONTEXT), "--host", "127.0.0.1",
              # 服务端禁用 Qwen3 思考模式（请求级 chat_template_kwargs 对部分模型无效）
              "--chat-template-kwargs", '{"enable_thinking": %s}' % ("true" if _ENABLE_LOCAL_THINKING else "false")],
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            stdout=_logf, stderr=subprocess.STDOUT,
             text=True,
         )
+        print(f"[GGUF] llama-server 输出日志: {_log_path}")
 
         # 等待服务就绪（最多 60 秒）
         print("[GGUF] 等待服务就绪...")
@@ -423,7 +427,17 @@ def get_model_and_tokenizer():
             time.sleep(1)
         else:
             _llama_proc.kill()
-            raise RuntimeError("llama-server 启动超时")
+            # 把 llama-server 自己的最后输出带进错误信息，便于定位原因
+            _tail = ""
+            try:
+                with open(_log_path, encoding="utf-8", errors="replace") as _lf:
+                    _tail = "\n".join(_lf.read().splitlines()[-25:])
+            except Exception:
+                pass
+            raise RuntimeError(
+                "llama-server 启动超时（60秒内 /health 未就绪）\n"
+                f"--- llama-server 最近输出（{_log_path}）---\n{_tail}"
+            )
 
         # 设置全局 API URL，推理代码自动走 API 路径
         global DEEPSEEK_API_URL
