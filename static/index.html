@@ -1359,6 +1359,7 @@ console.log('[QuantView] JS loaded');
       diagLog('分析流已建立，开始接收…');
       // 空闲监测：模型预填充/思考阶段可能几十秒无事件，显示"已 N 秒无更新"避免误判断开
       var lastEventTime = Date.now();
+      var stallAborted = false;
       var idleTimer = setInterval(function () {
         var idle = Date.now() - lastEventTime;
         if (idle > 10000) {
@@ -1370,6 +1371,13 @@ console.log('[QuantView] JS loaded');
         }
         if (idle % 30000 < 5000) {
           diagLog('空闲 ' + Math.round(idle / 1000) + 's：已收 ' + diagChunks + ' 块，fullText=' + (typeof fullText !== 'undefined' ? fullText.length : 0));
+        }
+        // 停滞超时：180 秒无任何事件 → 中止请求，提示并复位，同时通知服务端释放模型
+        if (idle > 180000 && !stallAborted) {
+          stallAborted = true;
+          clearInterval(idleTimer);
+          showError('连接已中断（180 秒无数据）：可能是网络或服务端异常，已中止后台任务释放模型，请重试。');
+          try { controller.abort(); } catch (e) {}
         }
       }, 5000);
 
