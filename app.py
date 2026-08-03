@@ -87,12 +87,7 @@ if DEBUG_MODE:
         print(f" API Key: {DEEPSEEK_API_KEY[:10]}...")
     print("=" * 60)
 else:
-    # torch / transformers / llama-cpp 均按需导入
-    _HAS_TORCH = False
-    _HAS_LLAMA_CPP = False
-    AutoModelForCausalLM = AutoTokenizer = TextIteratorStreamer = None
-    torch = None
-    Thread = None
+    pass  # 本地推理仅支持 GGUF（外部 llama-server），无 torch/transformers 依赖
     Llama = None
 
 # ── 中文字体配置 ──
@@ -235,70 +230,44 @@ app = Flask(__name__, static_folder="static", static_url_path="")
 # 限制上传文件总大小为 200MB（支持多文件）
 app.config["MAX_CONTENT_LENGTH"] = 200 * 1024 * 1024
 
-# ── 模型发现与选择 ──
+# ── 模型发现与选择（仅支持 GGUF）──
 _MODELS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models")
 _model = None
 _tokenizer = None
 MODEL_PATH = None
-MODEL_TYPE = "hf"  # "hf" 或 "gguf"
+MODEL_TYPE = "gguf"
 
 
 def _scan_models():
-    """扫描 models/ 目录，返回可用模型列表 {名称: (路径, 类型)}。
-
-    类型: "hf" = HuggingFace, "gguf" = GGUF 格式
-    """
+    """扫描 models/ 目录，返回可用 GGUF 模型列表 {名称: 路径}。"""
     if not os.path.isdir(_MODELS_DIR):
         print(f"[模型] models/ 目录不存在: {_MODELS_DIR}")
         return {}
 
-    _HF_SIGNATURE = [
-        "config.json",
-        "pytorch_model.bin",
-        "model.safetensors",
-        "model-00001-of-",
-        "tokenizer.json",
-        "tokenizer_config.json",
-    ]
-
+    _HF_SIGNATURE = ["config.json", "model.safetensors", "tokenizer.json", "tokenizer_config.json"]
     available = {}
 
-    # ── 扫描子目录（HF 格式 + 目录内的 GGUF 文件）──
     all_items = os.listdir(_MODELS_DIR)
     all_dirs = [d for d in all_items if os.path.isdir(os.path.join(_MODELS_DIR, d))]
-
     print(f"[模型] 扫描 models/ 目录: 发现 {len(all_dirs)} 个子目录, {len(all_items)} 个条目")
 
     for entry in all_dirs:
         full = os.path.join(_MODELS_DIR, entry)
-        matched = ""
-        model_type = "hf"
 
-        # 检查 HF 签名
-        for sig in _HF_SIGNATURE:
-            if sig.endswith("-"):
-                if any(f.startswith(sig) for f in os.listdir(full)):
-                    matched = sig
-                    break
-            elif os.path.isfile(os.path.join(full, sig)):
-                matched = sig
-                break
-
-        if matched:
-            available[entry] = (full, "hf")
-            print(f"  ✓ {entry} (HF, 匹配: {matched})")
-            continue
-
-        # 检查目录内的 GGUF 文件
+        # 目录内的 GGUF 文件
         gguf_files = [f for f in os.listdir(full) if f.endswith(".gguf")]
         if gguf_files:
-            gguf_path = os.path.join(full, gguf_files[0])
-            available[entry] = (gguf_path, "gguf")
+            available[entry] = os.path.join(full, gguf_files[0])
             print(f"  ✓ {entry} (GGUF: {gguf_files[0]})")
             continue
 
+        # 仅含 HuggingFace 文件的目录：本版本不支持 HF 路线
+        if any(os.path.isfile(os.path.join(full, sig)) for sig in _HF_SIGNATURE):
+            print(f"  ✗ {entry} — HuggingFace 模型目录（本版本仅支持 GGUF，请下载 .gguf 文件）")
+            continue
+
         subfiles = os.listdir(full)[:5]
-        print(f"  ✗ {entry} — 无模型签名，目录内容: {subfiles}")
+        print(f"  ✗ {entry} — 无 GGUF 文件，目录内容: {subfiles}")
 
     # ── 扫描 models/ 根目录下的 .gguf 文件 ──
     for item in all_items:
@@ -306,7 +275,7 @@ def _scan_models():
         if os.path.isfile(full) and item.endswith(".gguf"):
             name = item.replace(".gguf", "")
             if name not in available:
-                available[name] = (full, "gguf")
+                available[name] = full
                 print(f"  ✓ {name} (GGUF 单文件: {item})")
 
     return available
@@ -315,50 +284,45 @@ def _scan_models():
 def _select_model():
     """根据可用模型数量和环境变量选择模型路径。
 
-    优先级: DEEPANALYZE_MODEL 环境变量 > 单模型自动选择 > 多模型报错提示
+    优先级: DEEPANALYZE_MODEL 环境变量 > 单模型自动选择 > 多模型手动选择
     """
     if DEBUG_MODE:
-        return None
+        return None, "gguf"
 
     available = _scan_models()
     if not available:
         print("=" * 60)
-        print(" 错误: models/ 目录下未找到任何模型！")
+        print(" 错误: models/ 目录下未找到任何 GGUF 模型！")
         print(f" 目录: {_MODELS_DIR}")
-        print(" 请确保模型文件夹内包含以下任一文件:")
-        print("   config.json / model.safetensors / pytorch_model.bin / tokenizer.json")
+        print(" 请放入 .gguf 模型文件（如 Qwen3-32B-Q4_K_M.gguf）")
         print(" 使用调试模式可跳过本地模型:")
         print("   DEEPANALYZE_DEBUG=true DEEPSEEK_API_KEY=sk-xxx python app.py")
         print("=" * 60)
-        # 调试模式下不退出，其他模式退出
         if not DEBUG_MODE:
             exit(1)
-        return None
+        return None, "gguf"
 
     env_model = os.environ.get("DEEPANALYZE_MODEL", "").strip()
     if env_model:
         if env_model in available:
-            return available[env_model]  # (path, mtype)
-        else:
-            print("=" * 60)
-            print(f" 错误: 指定的模型 '{env_model}' 未找到")
-            print(f" 可用模型: {', '.join(available.keys())}")
-            print("=" * 60)
-            exit(1)
+            return available[env_model], "gguf"
+        print("=" * 60)
+        print(f" 错误: 指定的模型 '{env_model}' 未找到")
+        print(f" 可用模型: {', '.join(available.keys())}")
+        print("=" * 60)
+        exit(1)
 
     if len(available) == 1:
-        name, (path, mtype) = next(iter(available.items()))
-        type_tag = "GGUF" if mtype == "gguf" else "HF"
-        print(f"[模型] 自动选择唯一可用模型: {name} ({type_tag})")
-        return path, mtype
+        name, path = next(iter(available.items()))
+        print(f"[模型] 自动选择唯一可用模型: {name} (GGUF)")
+        return path, "gguf"
 
     # 多个模型，手动选择
     sorted_models = sorted(available.items())
     print("=" * 60)
     print(f" 发现 {len(available)} 个可用模型:")
-    for i, (name, (_, mtype)) in enumerate(sorted_models, 1):
-        type_tag = "GGUF" if mtype == "gguf" else "HF"
-        print(f"   [{i}] {name}  ({type_tag})")
+    for i, (name, _) in enumerate(sorted_models, 1):
+        print(f"   [{i}] {name}  (GGUF)")
     print()
 
     while True:
@@ -366,11 +330,10 @@ def _select_model():
             choice = input(f" 请选择模型 [1-{len(sorted_models)}]: ").strip()
             idx = int(choice)
             if 1 <= idx <= len(sorted_models):
-                name, (path, mtype) = sorted_models[idx - 1]
-                type_tag = "GGUF" if mtype == "gguf" else "HF"
-                print(f"\n 已选择: {name} ({type_tag})")
+                name, path = sorted_models[idx - 1]
+                print(f"\n 已选择: {name} (GGUF)")
                 print("=" * 60)
-                return path, mtype
+                return path, "gguf"
             print(f" 请输入 1 到 {len(sorted_models)} 之间的数字")
         except (ValueError, EOFError):
             print(" 输入无效，请输入数字")
@@ -380,13 +343,8 @@ def _select_model():
 
 
 def get_model_and_tokenizer():
-    """懒加载本地模型。调试模式下跳过，返回 (model, tokenizer)。
-
-    HF 模型: tokenizer 是 AutoTokenizer, model 是 AutoModel
-    GGUF 模型: tokenizer 是 Llama 对象（自带 tokenize）, model 也是同一个 Llama
-    调用方统一使用 (model, tokenizer) 接口。
-    """
-    global _model, _tokenizer, MODEL_PATH, MODEL_TYPE
+    """懒加载本地模型（GGUF）：启动外部 llama-server 进程。调试模式下跳过。"""
+    global _model, _tokenizer, MODEL_PATH
 
     if DEBUG_MODE:
         return None, None
@@ -397,125 +355,90 @@ def get_model_and_tokenizer():
     if _model is None:
         model_name = os.path.basename(MODEL_PATH)
         print("=" * 60)
-        print(f"正在加载模型: {model_name}")
-        print(f"类型: {'GGUF' if MODEL_TYPE == 'gguf' else 'HuggingFace'}")
+        print(f"正在加载模型: {model_name} (GGUF)")
         print(f"路径: {MODEL_PATH}")
         print("首次加载需 10-30 秒，请稍候...")
         print("=" * 60)
 
-        if MODEL_TYPE == "gguf":
-            # ── GGUF 模型：启动外部 llama-server 进程 ──
-            import subprocess
-            import time
+        # ── GGUF 模型：启动外部 llama-server 进程 ──
+        import subprocess
+        import time
 
-            # 查找 llama-server 二进制
-            server_bin = os.environ.get("LLAMA_SERVER_PATH", "")
-            if not server_bin:
-                # 自动查找：项目目录、常见路径
-                candidates = [
-                    os.path.join(os.path.dirname(os.path.abspath(__file__)), "llama-server.exe"),
-                    os.path.join(os.path.dirname(os.path.abspath(__file__)), "llama-server"),
-                    "llama-server", "llama-server.exe",
-                    "C:/Users/tc191/llama-cpp/llama-server.exe",
-                ]
-                for c in candidates:
-                    if os.path.isfile(c) or shutil.which(c):
-                        server_bin = c
-                        break
-
-            if not server_bin:
-                raise RuntimeError(
-                    "未找到 llama-server 二进制。请设置环境变量 LLAMA_SERVER_PATH\n"
-                    "或下载 llama.cpp 到项目目录: https://github.com/ggerganov/llama.cpp/releases"
-                )
-
-            port = 8080
-            # 检查端口是否已被占用，自动递增
-            while True:
-                import socket
-                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                occupied = s.connect_ex(("127.0.0.1", port)) == 0
-                s.close()
-                if not occupied:
+        # 查找 llama-server 二进制（优先项目目录 llama-server/ 文件夹）
+        server_bin = os.environ.get("LLAMA_SERVER_PATH", "")
+        if not server_bin:
+            _project_dir = os.path.dirname(os.path.abspath(__file__))
+            candidates = [
+                os.path.join(_project_dir, "llama-server", "llama-server.exe"),
+                os.path.join(_project_dir, "llama-server", "llama-server"),
+                os.path.join(_project_dir, "llama-server.exe"),
+                os.path.join(_project_dir, "llama-server"),
+                "llama-server", "llama-server.exe",
+                "C:/Users/tc191/llama-cpp/llama-server.exe",
+            ]
+            for c in candidates:
+                if os.path.isfile(c) or shutil.which(c):
+                    server_bin = c
                     break
-                port += 1
 
-            print(f"[GGUF] 启动 llama-server: {server_bin}")
-            print(f"[GGUF] 端口: {port}, 模型: {MODEL_PATH}")
-
-            _llama_proc = subprocess.Popen(
-                [server_bin, "-m", MODEL_PATH, "--port", str(port),
-                 "-ngl", "99", "-c", str(_CONTEXT), "--host", "127.0.0.1",
-                 # 服务端禁用 Qwen3 思考模式（请求级 chat_template_kwargs 对部分模型无效）
-                 "--chat-template-kwargs", '{"enable_thinking": %s}' % ("true" if _ENABLE_LOCAL_THINKING else "false")],
-                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                text=True,
+        if not server_bin:
+            raise RuntimeError(
+                "未找到 llama-server 二进制。请把 llama.cpp 的 llama-server 放到项目目录的\n"
+                "llama-server/ 文件夹（即 <项目目录>/llama-server/llama-server），\n"
+                "或设置环境变量 LLAMA_SERVER_PATH 指向二进制路径。\n"
+                "下载: https://github.com/ggerganov/llama.cpp/releases"
             )
 
-            # 等待服务就绪（最多 60 秒）
-            print("[GGUF] 等待服务就绪...")
-            deadline = time.time() + 60
-            while time.time() < deadline:
-                try:
-                    import urllib.request as _ur
-                    r = _ur.urlopen(f"http://127.0.0.1:{port}/health", timeout=2)
-                    if r.status == 200:
-                        break
-                except Exception:
-                    pass
-                time.sleep(1)
-            else:
-                _llama_proc.kill()
-                raise RuntimeError("llama-server 启动超时")
+        port = 8080
+        # 检查端口是否已被占用，自动递增
+        while True:
+            import socket
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            occupied = s.connect_ex(("127.0.0.1", port)) == 0
+            s.close()
+            if not occupied:
+                break
+            port += 1
 
-            # 设置全局 API URL，推理代码自动走 API 路径
-            global DEEPSEEK_API_URL
-            DEEPSEEK_API_URL = f"http://127.0.0.1:{port}/v1/chat/completions"
-            _model = f"llama-server:{port}"
-            _tokenizer = f"llama-server:{port}"
+        print(f"[GGUF] 启动 llama-server: {server_bin}")
+        print(f"[GGUF] 端口: {port}, 模型: {MODEL_PATH}")
 
-            # 注册退出清理
-            import atexit
-            atexit.register(lambda: _llama_proc.kill() if _llama_proc.poll() is None else None)
+        _llama_proc = subprocess.Popen(
+            [server_bin, "-m", MODEL_PATH, "--port", str(port),
+             "-ngl", "99", "-c", str(_CONTEXT), "--host", "127.0.0.1",
+             # 服务端禁用 Qwen3 思考模式（请求级 chat_template_kwargs 对部分模型无效）
+             "--chat-template-kwargs", '{"enable_thinking": %s}' % ("true" if _ENABLE_LOCAL_THINKING else "false")],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True,
+        )
 
-            print(f"[GGUF] llama-server 已就绪 -> {DEEPSEEK_API_URL}")
-
-        else:
-            # ── HuggingFace 模型加载（按需导入）──
-            global _HAS_TORCH
-            if not _HAS_TORCH:
-                import torch as _t
-                from transformers import AutoModelForCausalLM as _AM, AutoTokenizer as _AT, TextIteratorStreamer as _TS
-                from threading import Thread as _Th
-                globals().update(torch=_t, AutoModelForCausalLM=_AM, AutoTokenizer=_AT,
-                                 TextIteratorStreamer=_TS, Thread=_Th)
-                _HAS_TORCH = True
+        # 等待服务就绪（最多 60 秒）
+        print("[GGUF] 等待服务就绪...")
+        deadline = time.time() + 60
+        while time.time() < deadline:
             try:
-                _tokenizer = AutoTokenizer.from_pretrained(
-                    MODEL_PATH,
-                    trust_remote_code=True,
-                )
-                _model = AutoModelForCausalLM.from_pretrained(
-                    MODEL_PATH,
-                    torch_dtype=torch.bfloat16,
-                    device_map="auto",
-                    trust_remote_code=True,
-                )
-            except (ValueError, ImportError) as e:
-                msg = str(e)
-                if "does not recognize this architecture" in msg or "not supported" in msg:
-                    print("=" * 60)
-                    print(" 模型架构不支持！transformers 版本过旧。")
-                    print(f" 当前模型: {model_name}")
-                    print(" 请执行: pip install --upgrade transformers")
-                    print(" 或选择其他可用模型。")
-                    print("=" * 60)
-                    raise RuntimeError(f"模型架构不支持，请升级 transformers: {msg}")
-                raise
+                import urllib.request as _ur
+                r = _ur.urlopen(f"http://127.0.0.1:{port}/health", timeout=2)
+                if r.status == 200:
+                    break
+            except Exception:
+                pass
+            time.sleep(1)
+        else:
+            _llama_proc.kill()
+            raise RuntimeError("llama-server 启动超时")
 
-            print("HF 模型加载完成。")
-            if _tokenizer.pad_token is None:
-                _tokenizer.pad_token = _tokenizer.eos_token
+        # 设置全局 API URL，推理代码自动走 API 路径
+        global DEEPSEEK_API_URL
+        DEEPSEEK_API_URL = f"http://127.0.0.1:{port}/v1/chat/completions"
+        _model = f"llama-server:{port}"
+        _tokenizer = f"llama-server:{port}"
+
+        # 注册退出清理
+        import atexit
+        atexit.register(lambda: _llama_proc.kill() if _llama_proc.poll() is None else None)
+
+        print(f"[GGUF] llama-server 已就绪 -> {DEEPSEEK_API_URL}")
 
     return _model, _tokenizer
 
@@ -527,8 +450,7 @@ if not DEBUG_MODE:
     print("=" * 60)
     MODEL_PATH, MODEL_TYPE = _select_model()
     if MODEL_PATH:
-        type_tag = "GGUF" if MODEL_TYPE == "gguf" else "HF"
-        print(f" 已选择模型: {os.path.basename(MODEL_PATH)} ({type_tag})")
+        print(f" 已选择模型: {os.path.basename(MODEL_PATH)} (GGUF)")
         print(f" 路径: {MODEL_PATH}")
         print("=" * 60)
         get_model_and_tokenizer()
@@ -1036,7 +958,7 @@ def _call_deepseek_api_stream(prompt, max_tokens=16384, extra_body=None):
 
 
 def _run_inference(prompt, max_tokens=16384, stream=False):
-    """统一推理入口，覆盖三种后端（DeepSeek API / GGUF / HF）。
+    """统一推理入口，覆盖两种后端（DeepSeek API / GGUF llama-server）。
 
     stream=False: 返回分析文本字符串。
     stream=True: 返回生成器，产出 ("think"|"text", chunk) 元组。
@@ -1046,94 +968,11 @@ def _run_inference(prompt, max_tokens=16384, stream=False):
             return _call_deepseek_api_stream(prompt, max_tokens=max_tokens)
         return _call_deepseek_api(prompt, max_tokens=max_tokens)
 
-    model, tokenizer = get_model_and_tokenizer()
-
-    if MODEL_TYPE == "gguf":
-        if isinstance(model, str) and model.startswith("llama-server:"):
-            # 外部 llama-server → 走 API 路径（max_tokens 对齐本地模型）
-            if stream:
-                return _call_deepseek_api_stream(prompt, max_tokens=65536, extra_body=_LOCAL_SERVER_BODY)
-            return _call_deepseek_api(prompt, max_tokens=65536, extra_body=_LOCAL_SERVER_BODY)
-
-        # ── 内嵌 llama-cpp-python ──
-        def _gguf_llama_stream():
-            for chunk in model.create_chat_completion(
-                messages=[
-                    {"role": "system", "content": "你是财务分析师。逐表深度分析，每个表输出150字以上。引用预计算汇总中的具体数字。不要概括，要详细。"},
-                    {"role": "user", "content": prompt},
-                ],
-                max_tokens=65536, temperature=_TEMPERATURE, top_p=0.9,
-                stream=True, chat_template_kwargs={"enable_thinking": False},
-                repeat_penalty=1.15, repeat_last_n=512):
-                delta = chunk["choices"][0].get("delta", {})
-                text = delta.get("content", "")
-                if text:
-                    yield ("text", text)
-        if stream:
-            return _gguf_llama_stream()
-        try:
-            result = model.create_chat_completion(
-                messages=[
-                    {"role": "system", "content": "直接输出分析报告，用 Markdown。"},
-                    {"role": "user", "content": prompt},
-                ],
-                max_tokens=65536, temperature=_TEMPERATURE, top_p=0.9,
-                chat_template_kwargs={"enable_thinking": False},
-                repeat_penalty=1.15, repeat_last_n=512)
-            output = result["choices"][0]["message"]["content"].strip()
-        except Exception as e:
-            raise RuntimeError(f"GGUF 推理出错: {str(e)}")
-        if not output or not output.strip():
-            output = "（模型未生成有效回复，请重试）"
-        return output
-
-    # ── HuggingFace 模型推理 (transformers) ──
-    try:
-        if stream:
-            messages = [{"role": "user", "content": prompt}]
-            formatted = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-            inputs = tokenizer(formatted, return_tensors="pt", truncation=True, max_length=8192).to(model.device)
-
-            streamer = TextIteratorStreamer(tokenizer, skip_prompt=True, skip_special_tokens=True)
-            gen_kwargs = dict(
-                **inputs,
-                max_new_tokens=4096,
-                temperature=_TEMPERATURE,
-                top_p=0.9,
-                do_sample=True,
-                pad_token_id=tokenizer.pad_token_id or tokenizer.eos_token_id,
-                streamer=streamer,
-            )
-            thread = Thread(target=model.generate, kwargs=gen_kwargs)
-            thread.start()
-
-            def _hf_stream():
-                for token_text in streamer:
-                    yield ("text", token_text)
-                thread.join()
-                del inputs
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-            return _hf_stream()
-
-        messages = [{"role": "user", "content": prompt}]
-        formatted_prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-        inputs = tokenizer(formatted_prompt, return_tensors="pt", truncation=True, max_length=8192).to(model.device)
-        with torch.no_grad():
-            outputs = model.generate(**inputs, max_new_tokens=4096, temperature=_TEMPERATURE, top_p=0.9,
-                                     do_sample=True, pad_token_id=tokenizer.pad_token_id or tokenizer.eos_token_id)
-        gen_ids = outputs[0][inputs["input_ids"].shape[1]:]
-        model_output = tokenizer.decode(gen_ids, skip_special_tokens=True)
-        del inputs, outputs
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-        if not model_output or not model_output.strip():
-            model_output = "（模型未生成有效回复，请重试）"
-        return model_output
-    except torch.cuda.OutOfMemoryError:
-        raise RuntimeError("CUDA 显存不足。请尝试减少文件数据量。")
-    except Exception as e:
-        raise RuntimeError(f"模型推理出错: {str(e)}")
+    # GGUF：外部 llama-server 已就绪，走 OpenAI 兼容 API 路径
+    get_model_and_tokenizer()
+    if stream:
+        return _call_deepseek_api_stream(prompt, max_tokens=65536, extra_body=_LOCAL_SERVER_BODY)
+    return _call_deepseek_api(prompt, max_tokens=65536, extra_body=_LOCAL_SERVER_BODY)
 
 
 def _prepare_analysis_input(valid_files, question):

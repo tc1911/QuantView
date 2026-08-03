@@ -10,14 +10,15 @@ QuantView is a Chinese-language local data analysis assistant: a Flask backend (
 
 ```bash
 python app.py        # serves http://localhost:5000 (or start.bat / start.ps1 on Windows)
+./start.sh           # macOS / Linux：./start.sh | master | node [port]
 ```
 
 Startup behavior depends on mode (see Environment variables):
 
-- **Normal mode**: requires a model in `models/`. Lazy-loads torch/transformers at startup (first load takes 10–30s). Exits with an error if no model is found.
+- **Normal mode**: requires a GGUF model in `models/`. Spawns the external `llama-server` at startup (first load takes 10–30s). Exits with an error if no model is found.
 - **Debug mode** (`DEEPANALYZE_DEBUG=true`): skips local models entirely and calls the DeepSeek API — this is the fastest way to develop/test without GPU or local model weights. Always sets `DEEPSEEK_API_KEY` in this mode.
 
-Useful deps: `flask pandas matplotlib numpy` (required); `openpyxl` (required — pandas reads .xlsx with it), `xlrd` (.xls); `pdfplumber` (PDF tables, optional); `python-docx` (Word export, optional); `torch transformers` (HF models, lazy-imported); `llama-cpp-python` (embedded GGUF, lazy-imported).
+Useful deps: `flask pandas matplotlib numpy` (required); `openpyxl` (required — pandas reads .xlsx with it), `xlrd` (.xls); `pdfplumber` (PDF tables, optional); `python-docx` (Word export, optional). No torch/transformers — local inference is GGUF-only via the external `llama-server` binary.
 
 ## Environment variables
 
@@ -28,7 +29,7 @@ Useful deps: `flask pandas matplotlib numpy` (required); `openpyxl` (required �
 | `DEEPSEEK_API_URL` | OpenAI-compatible endpoint override (default `https://api.deepseek.com/chat/completions`) — also points at the local llama-server when GGUF is used |
 | `DEEPSEEK_THINKING` | `1/true` → use `deepseek-reasoner` (streams `reasoning_content` as "think" events) |
 | `DEEPANALYZE_MODEL` | Force-select a model by name from the `models/` scan |
-| `LLAMA_SERVER_PATH` | Path to llama-server binary (default auto-search, incl. `C:/Users/tc191/llama-cpp/llama-server.exe`) |
+| `LLAMA_SERVER_PATH` | Path to llama-server binary. Default auto-search: `<项目目录>/llama-server/llama-server` (or `.exe`), project root, PATH. The binary is placed manually in the `llama-server/` folder (Windows: llama-server.exe, macOS/Linux: llama-server, macOS Metal build recommended) |
 | `DEEPANALYZE_NODES` | `name=url,name=url` 加速节点列表 — 设置了即为**主节点（分布式）模式**，工作表任务轮流分发，主节点只生成总览；不设置则为单节点模式 |
 | `DEEPANALYZE_NODE_TIMEOUT` | 单次节点调用超时秒数（默认 600） |
 | `DEEPANALYZE_HARD_NUMS_LIMIT` | 硬数字进入 prompt 的最大字符数（默认 12000；覆盖全表约需 8500，设小了资金状况/经营预算等表会被截断） |
@@ -39,17 +40,16 @@ Useful deps: `flask pandas matplotlib numpy` (required); `openpyxl` (required �
 
 ## Architecture
 
-### Inference backends (3 paths, all behind `get_model_and_tokenizer()`)
+### Inference backends (2 paths, all behind `_run_inference`)
 
 1. **DeepSeek API** (debug mode): `_call_deepseek_api` / `_call_deepseek_api_stream` — plain `urllib` POST to an OpenAI-compatible `/chat/completions` endpoint. The stream variant yields `("think", ...)` and `("text", ...)` tuples.
-2. **GGUF via external llama-server**: spawns `llama-server -m <model> --port N -ngl 99 -c 65536` as a subprocess (port auto-increments from 8080 if busy), waits on `/health`, then sets `DEEPSEEK_API_URL` to the local server so **the same API call path is reused**. Killed via `atexit`.
-3. **HuggingFace via transformers**: lazily imported inside the load function (torch/transformers are not imported at module load). Streams via `TextIteratorStreamer` + thread.
+2. **GGUF via external llama-server**: spawns `llama-server -m <model> --port N -ngl 99 -c <ctx>` as a subprocess (port auto-increments from 8080 if busy), waits on `/health`, then sets `DEEPSEEK_API_URL` to the local server so **the same API call path is reused**. Killed via `atexit`. HF/transformers route removed — GGUF only.
 
-All three are wrapped by **`_run_inference(prompt, max_tokens, stream)`** — the single inference entry point: `stream=False` returns text, `stream=True` returns a `("think"|"text", chunk)` generator. New code paths (e.g. `/analyze/sheet`) call it instead of reaching into backends directly.
+Both are wrapped by **`_run_inference(prompt, max_tokens, stream)`** — the single inference entry point: `stream=False` returns text, `stream=True` returns a `("think"|"text", chunk)` generator. New code paths (e.g. `/analyze/sheet`) call it instead of reaching into backends directly.
 
 ### Model discovery (`_scan_models`, `_select_model`)
 
-Scans `models/` for: HF directories (signed by `config.json`/`safetensors`/`tokenizer.json` etc.) and `.gguf` files (root or inside dirs). Selection priority: `DEEPANALYZE_MODEL` env var → auto-select if exactly one → interactive numbered prompt.
+Scans `models/` for `.gguf` files (root or inside dirs). HF-only directories are skipped with a hint. Selection priority: `DEEPANALYZE_MODEL` env var → auto-select if exactly one → interactive numbered prompt.
 
 ### Analysis data pipeline (`/analyze` and `/analyze/stream`)
 
