@@ -865,7 +865,7 @@ def _call_deepseek_api(prompt, max_tokens=16384, extra_body=None):
         method="POST",
     )
 
-    print("[DeepSeek API] 发送推理请求...")
+    print("[api] 发送推理请求...")
     try:
         with urllib.request.urlopen(req, timeout=300) as resp:
             result = json.loads(resp.read().decode("utf-8"))
@@ -883,7 +883,7 @@ def _call_deepseek_api(prompt, max_tokens=16384, extra_body=None):
         output = "（API 未生成有效回复，请重试）"
 
     usage = result.get("usage", {})
-    print(f"[DeepSeek API] 推理完成 — 输入 {usage.get('prompt_tokens', '?')} tokens, "
+    print(f"[api] 推理完成 — 输入 {usage.get('prompt_tokens', '?')} tokens, "
           f"输出 {usage.get('completion_tokens', '?')} tokens")
 
     return output
@@ -923,7 +923,7 @@ def _call_deepseek_api_stream(prompt, max_tokens=16384, extra_body=None):
         method="POST",
     )
 
-    print(f"[DeepSeek API] 发送流式推理请求 (模型: {DEEPSEEK_MODEL})...")
+    print(f"[api] 发送流式推理请求 (模型: {DEEPSEEK_MODEL})...")
     try:
         resp = urllib.request.urlopen(req, timeout=600)
     except urllib.error.HTTPError as e:
@@ -964,7 +964,7 @@ def _call_deepseek_api_stream(prompt, max_tokens=16384, extra_body=None):
                 continue
 
     resp.close()
-    print(f"[DeepSeek API] 流式推理完成 — {think_count} 个思考块, {chunk_count} 个文本块")
+    print(f"[api] 流式推理完成 — {think_count} 个思考块, {chunk_count} 个文本块")
 
 
 def _run_inference(prompt, max_tokens=16384, stream=False):
