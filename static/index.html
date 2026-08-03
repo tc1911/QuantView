@@ -990,7 +990,8 @@
 </main>
 
 <footer class="footer">
-  QuantView &mdash; 本地数据分析助手 &mdash; 所有数据处理均在本地完成
+  <span id="diagToggle" title="显示/隐藏诊断信息" style="cursor:pointer">QuantView</span>
+  &mdash; 本地数据分析助手 &mdash; 所有数据处理均在本地完成
 </footer>
 
 <script>
@@ -2012,9 +2013,9 @@ console.log('[QuantView] JS loaded');
     el.appendChild(line);
     el.scrollTop = el.scrollHeight;
   }
-  var footerEl = document.querySelector('.footer');
-  if (footerEl) footerEl.style.cursor = 'pointer';
-  if (footerEl) footerEl.addEventListener('click', function () {
+  var diagToggleEl = document.getElementById('diagToggle');
+  if (diagToggleEl) diagToggleEl.addEventListener('click', function (e) {
+    e.stopPropagation();
     var el = document.getElementById('diagStrip');
     if (el) el.style.display = (el.style.display === 'none') ? 'block' : 'none';
   });
