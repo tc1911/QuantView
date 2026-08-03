@@ -445,8 +445,9 @@ def extract_hard_numbers_core(stream):
                             break
                     if not label:
                         continue
-                    # 跳过非数据标签（记录为段落标题）
-                    if label in _skip_labels:
+                    # 跳过非数据标签（记录为段落标题）；"单位："开头的是纯单位注释行
+                    #（如"单位：万元/天/吨"），不是指标，禁止提取成硬数字
+                    if label in _skip_labels or label.startswith("单位："):
                         section_context = label
                         last_section = label
                         continue
