@@ -719,23 +719,47 @@
     border: 1px dashed var(--border);
     border-radius: var(--radius);
   }
-  /* ── 二次追问聊天面板 ── */
+  /* ── 二次追问聊天面板（悬浮窗：固定在视口右下角，激活即可见，不依赖滚动） ── */
   .chat-panel {
     display: none;
     flex-direction: column;
+    position: fixed;
+    right: 24px;
+    bottom: 24px;
+    width: min(460px, calc(100vw - 48px));
+    max-height: 62vh;
     border: 1px solid var(--border);
     border-radius: var(--radius);
     background: var(--card-bg);
     overflow: hidden;
+    box-shadow: 0 8px 30px rgba(0, 0, 0, 0.28);
+    z-index: 999;
   }
   .chat-panel.active { display: flex; }
-  .chat-panel .card-title { padding: 10px 14px; }
+  .chat-panel .card-title {
+    padding: 10px 14px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  .chat-close-btn {
+    background: none;
+    border: none;
+    color: var(--text-muted);
+    font-size: 16px;
+    line-height: 1;
+    cursor: pointer;
+    padding: 2px 6px;
+  }
+  .chat-close-btn:hover { color: var(--text); }
   .chat-thread {
     padding: 12px;
     display: flex;
     flex-direction: column;
     gap: 10px;
-    max-height: 360px;
+    flex: 1;
+    min-height: 120px;
+    max-height: calc(62vh - 110px);
     overflow-y: auto;
   }
   .chat-msg {
@@ -924,9 +948,9 @@
     <input type="file" id="importSessionFile" accept=".json,application/json" style="display:none">
   </div>
 
-  <!-- 二次追问（聊天） -->
+  <!-- 二次追问（聊天，悬浮窗） -->
   <div class="chat-panel" id="chatPanel">
-    <div class="card-title">继续追问</div>
+    <div class="card-title">继续追问<button class="chat-close-btn" id="chatCloseBtn" title="收起">&times;</button></div>
     <div class="chat-thread" id="chatThread"></div>
     <div class="chat-input-row">
       <input type="text" id="chatInput" placeholder="数据有疑问或回答不到位？继续追问…（Enter 发送）">
@@ -1804,8 +1828,12 @@ console.log('[QuantView] JS loaded');
     window.scrollTo({ top: 0, behavior: 'smooth' });
   });
 
-  // ── 二次追问：发送按钮 + Enter ──
+  // ── 二次追问：发送按钮 + Enter + 收起 ──
   document.getElementById('chatSendBtn').addEventListener('click', chatSend);
+  document.getElementById('chatCloseBtn').addEventListener('click', function () {
+    var cp3 = document.getElementById('chatPanel');
+    if (cp3) cp3.classList.remove('active');
+  });
   document.getElementById('chatInput').addEventListener('keydown', function (e) {
     if (e.key !== 'Enter') return;
     // 中文输入法组合期间按 Enter 是确认选词，不发送也不阻止默认行为，
@@ -1947,9 +1975,9 @@ console.log('[QuantView] JS loaded');
       + ' panel=' + !!document.getElementById('chatPanel')
       + ' thread=' + (document.getElementById('chatThread') ? document.getElementById('chatThread').children.length : -1)
       + ' panelVisible=' + (function () { var p = document.getElementById('chatPanel'); return !!(p && p.offsetParent !== null); })());
-    // 确保追问面板可见并滚动到输入框（导入会话/回车发送等路径可能未在视口内）
+    // 确保追问面板可见（悬浮窗固定在视口右下角，激活即显示）
     var cpn = document.getElementById('chatPanel');
-    if (cpn) { cpn.classList.add('active'); cpn.scrollIntoView({ behavior: 'smooth', block: 'nearest' }); }
+    if (cpn) cpn.classList.add('active');
     if (optQ === undefined) inp.value = '';
     chatAppend('user', q);
     if (currentSession) { currentSession.chat = currentSession.chat || []; currentSession.chat.push({ role: 'user', text: q }); }
@@ -2148,7 +2176,6 @@ console.log('[QuantView] JS loaded');
         ct2.appendChild(hint);
       }
       var ci = document.getElementById('chatInput');
-      cp2.scrollIntoView({ behavior: 'smooth', block: 'end' });
       if (ci) setTimeout(function () { ci.focus(); }, 400);
     } else if (cp2) {
       cp2.classList.remove('active');
