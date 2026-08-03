@@ -1686,6 +1686,7 @@ def analyze_followup():
     data = request.get_json(force=True, silent=True) or {}
     session_id = (data.get("session") or "").strip()
     question = (data.get("question") or "").strip()
+    print(f"[追问] /analyze/followup 收到问题: {question[:80]} (session={session_id[:8]})")
     if not session_id or not question:
         return jsonify({"error": "缺少 session 或 question"}), 400
     sess = _SESSIONS.get(session_id)
@@ -1749,6 +1750,7 @@ def analyze_stream():
     question = request.form.get("question", "").strip()
     if not question:
         return jsonify({"error": "分析问题不能为空"}), 400
+    print(f"[分析] /analyze/stream 收到问题: {question[:80]}")
 
     # 2. 保存文件字节（追问会话与分析共用，FileStorage 流只能读一次）
     from werkzeug.datastructures import FileStorage as _FS
