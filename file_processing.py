@@ -323,6 +323,11 @@ def extract_hard_numbers_core(stream):
     def _norm_period(raw):
         """标准化期别标签，正则匹配常见格式。"""
         import re
+        # 预算类必须优先于"上半年/下半年"（否则"2026下半年预算"会被截成 2026H2 丢失预算含义）
+        m = re.match(r'(\d{4})(?:年)?(?:下|上)半年预算', raw)
+        if m: return f'{m.group(1)}H{"2" if "下" in raw else "1"}预'
+        m = re.match(r'(\d{4})(?:年)?全年(?:预算)?', raw)
+        if m: return f'{m.group(1)}全年预'
         # 上半年/下半年
         m = re.match(r'(\d{4})上半年', raw)
         if m: return f'{m.group(1)}H1'
@@ -367,9 +372,19 @@ def extract_hard_numbers_core(stream):
                     continue
                 lines = []
                 col_periods = []
+                # 账龄表有 8 个账龄段列 + 合计列（共 10 列数据），其余表最多读 7 列
+                _max_col = 11 if "账龄" in sname else 8
+                # 首行"单位：X"会被 pandas 吃成列名，需从列名里取初始单位
+                cur_unit = ""
+                for _cu in list(sdf.columns)[:5]:
+                    if isinstance(_cu, str) and _cu.strip().startswith("单位："):
+                        _u = _cu.strip().replace("单位：", "").strip()
+                        if _u and len(_u) <= 10:
+                            cur_unit = _u
+                        break
                 for _hri in range(min(3, len(sdf))):
                     hdr_parts = []
-                    for c in list(sdf.columns)[1:8]:
+                    for c in list(sdf.columns)[1:_max_col]:
                         v = sdf.iloc[_hri][c]
                         if pd.notna(v):
                             vs = str(v).strip()
@@ -396,7 +411,7 @@ def extract_hard_numbers_core(stream):
                 # 兜底：如未从数据行找到表头，用列名作为期别标签
                 if not col_periods:
                     hdr_parts = []
-                    for c in list(sdf.columns)[1:8]:
+                    for c in list(sdf.columns)[1:_max_col]:
                         vs = str(c).strip()
                         if vs and 2 <= len(vs) <= 12 and not vs.startswith("Unnamed"):
                             if any(sk in vs for sk in _skip_hdrs):
@@ -432,12 +447,19 @@ def extract_hard_numbers_core(stream):
                                "期初", "内陆运输", "出口运输", "返桶运输",
                                "运输费量", "运输费", "运输单价", "里程",
                                "合同签订率", "合同执行率", "合同付款率",
-                               "主要材料费", "材料费", "投资合计",
+                               "投资合计",
                                "*****中心建设项目", "项目合计", "总计",
                                "资金收益率", "理财产品", "政府补助专项资金"}
                 # 通用标签：跨板块重复出现、需要带板块前缀区分的指标名
+                # （固定资产投资两个项目块、期间费用销售/管理两大块、人力预算块等）
                 _generic = {"合计", "总计", "氟化学", "锂电", "原材料", "库存商品",
-                            "半成品", "产成品", "发出商品及其他", "其他"}
+                            "半成品", "产成品", "发出商品及其他", "其他",
+                            "建筑工程费", "设备购置费", "安装费", "材料费", "主要材料费",
+                            "人工费用", "办公费用", "招待费用", "差旅费用", "咨询费用",
+                            "折旧费用", "车辆费用", "租赁费用", "摊销费用", "包装费用",
+                            "运输费用", "产品认证费",
+                            "工资", "年终奖金", "股权激励", "社会保险费", "住房公积金",
+                            "福利费", "工会经费", "职工教育经费", "其他费用"}
                 for _ri in range(min(len(sdf), 80)):
                     row = sdf.iloc[_ri]
                     label = ""
@@ -448,24 +470,81 @@ def extract_hard_numbers_core(stream):
                             break
                     if not label:
                         continue
+                    # 行内单位单元格："单位：X"可能出现在任意列（块标题行携带或独立行），
+                    # 用于区分同名指标的量（吨）/金额（万元）/单价（万元/吨）
+                    for _c in list(sdf.columns)[:_max_col]:
+                        _v = row[_c]
+                        if isinstance(_v, str) and _v.strip().startswith("单位："):
+                            _u = _v.strip().replace("单位：", "").strip()
+                            if _u and len(_u) <= 10:
+                                cur_unit = _u
+                            break
+                    # 表头行重检测：整表共用一份 col_periods 会误标中途的新表头块
+                    #（如税收表"税种|2026下半年预算|2025下半年实际|同比"、固投第二个项目块），
+                    # 无数值且含 ≥2 个期别词的文本行视为新表头，更新列期别
+                    _row_has_num = False
+                    _hdrs = []
+                    for _c in list(sdf.columns)[1:_max_col]:
+                        _v = row[_c]
+                        if pd.notna(_v):
+                            _vs = str(_v).strip()
+                            if not _vs:
+                                continue
+                            try:
+                                float(_vs)
+                                _row_has_num = True
+                            except (ValueError, TypeError):
+                                if 2 <= len(_vs) <= 14 and not _vs.replace(".", "").replace("-", "").isdigit():
+                                    if any(k in _vs for k in ("预算", "实际", "上半年", "下半年", "年度", "同比", "环比", "期末", "年初", "期初", "月", "合计", "总计")):
+                                        _hdrs.append(_norm_period(_vs))
+                    if not _row_has_num and len(_hdrs) >= 2:
+                        col_periods = [None] * (_max_col - 1)
+                        _ci = 0
+                        for _c in list(sdf.columns)[1:_max_col]:
+                            _v = row[_c]
+                            if pd.notna(_v):
+                                _vs = str(_v).strip()
+                                if _vs and 2 <= len(_vs) <= 14 and not _vs.replace(".", "").replace("-", "").isdigit():
+                                    if any(k in _vs for k in ("预算", "实际", "上半年", "下半年", "年度", "同比", "环比", "期末", "年初", "期初", "月", "合计", "总计")):
+                                        if _vs in ("同比", "环比"):
+                                            col_periods[_ci] = "__SKIP__"
+                                        else:
+                                            col_periods[_ci] = _norm_period(_vs)
+                            _ci += 1
+                        _last = None
+                        for _i in range(len(col_periods)):
+                            if col_periods[_i] is not None and col_periods[_i] != "__SKIP__":
+                                _last = col_periods[_i]
+                            elif col_periods[_i] is None and _last is not None:
+                                col_periods[_i] = _last
                     # 跳过非数据标签（记录为段落标题）；"单位："开头的是纯单位注释行
-                    #（如"单位：万元/天/吨"），不是指标，禁止提取成硬数字，也不更新段落上下文
+                    #（如"单位：万元/天/吨"），不是指标，禁止提取成硬数字，也不更新段落上下文；
+                    # 但单位本身要记录（cur_unit），用于区分同名指标的量（吨）/金额（万元）/单价
                     if label in _skip_labels or label.startswith("单位："):
-                        if not label.startswith("单位："):
+                        if label.startswith("单位："):
+                            _u = label.replace("单位：", "").strip()
+                            if _u and len(_u) <= 10:
+                                cur_unit = _u
+                        else:
                             section_context = label
                             last_section = label
                         continue
                     # 去重：通用标签（氟化学/原材料等）按"段落·标签"去重，同名指标出现在
                     # 不同板块时全部保留（如 氟化学库存·原材料 与 锂电库存·原材料）；
-                    # 其余标签按裸标签去重（跨板块重复的多为同一数据，保留一份即可）
-                    dedup_key = f"{last_section}·{label}" if label in _generic else label
+                    # 其余标签按"单位·标签"去重，使同名指标在不同单位块（吨/万元/单价）下
+                    # 全部保留（如 物流 产品运输 的 51100吨 与 900万元）
+                    _period_like = bool(re.match(r"^\d{4}(?:上|下)半年$", label)) or label in ("同比", "环比")
+                    if label in _generic or _period_like:
+                        dedup_key = f"{last_section}·{label}"
+                    else:
+                        dedup_key = f"{cur_unit}·{label}"
                     if dedup_key in seen:
                         last_section = label
                         continue
                     # 提取数值
                     val_pairs = []
                     seen_periods = set()
-                    for ci, c in enumerate(list(sdf.columns)[1:8]):
+                    for ci, c in enumerate(list(sdf.columns)[1:_max_col]):
                         if ci < len(col_periods):
                             pd_label = col_periods[ci]
                             if pd_label is None or pd_label == "__SKIP__":
@@ -476,13 +555,11 @@ def extract_hard_numbers_core(stream):
                         if pd.notna(v):
                             try:
                                 nv = float(v)
-                                if abs(nv) < 0.01 and nv != 0:
+                                if abs(nv) < 0.01 and nv != 0 and "率" not in label:
                                     continue
                                 if nv == int(nv):
                                     vs = str(int(nv))
-                                elif 0 < abs(nv) < 1 and label in ("净资产收益率", "净利率", "资产负债率", "费用率",
-                                                                     "税负率", "销售净利率", "合同执行率", "合同付款率",
-                                                                     "合同签订率", "总资产周转率"):
+                                elif 0 < abs(nv) < 1 and "率" in label:
                                     vs = f"{nv*100:.2f}%"
                                 else:
                                     vs = f"{nv:.4f}".rstrip("0").rstrip(".")
@@ -493,7 +570,10 @@ def extract_hard_numbers_core(stream):
                                     seen_periods.add(pd_label)
                             except (ValueError, TypeError):
                                 pass
-                    if not val_pairs:
+                    # 块标题行（如"氟化学内销账龄分布"）可能带 1 个杂散数值（残留比例/合计），
+                    # 视为段落标题而非指标：更新 section_context 并跳过，防止污染数据
+                    _title_kw = ("分布", "对比", "结构", "明细", "清单", "汇总")
+                    if (not val_pairs) or (len(val_pairs) == 1 and any(k in label for k in _title_kw)):
                         # 无数值的标签行视为段落标题（如"净利润变动""销售类型"），
                         # 同时更新 section_context——否则上下文会卡在上一个跳过标记
                         # （如"单位：万元"），导致后续所有合计行共用错误前缀、无法区分
@@ -518,7 +598,11 @@ def extract_hard_numbers_core(stream):
                     if any(p in ("基准", "冲刺") for p in col_periods if p):
                         if label in ("销售额", "净利润", "毛利", "销售收入"):
                             display_label = f"预算{label}"
-                    full_label = f"{ctx}{display_label}"
+                    # 非万元单位（吨/天/万元吨等）附加单位后缀，防止量/金额/单价混淆
+                    unit_suffix = ""
+                    if cur_unit and cur_unit not in ("万元", "元"):
+                        unit_suffix = f"·{cur_unit}"
+                    full_label = f"{ctx}{display_label}{unit_suffix}"
                     is_multiperiod = any(
                         p and (p[0].isdigit() or p in ("期末", "年初", "期初"))
                         for p in col_periods
@@ -529,13 +613,16 @@ def extract_hard_numbers_core(stream):
                         if val_pairs:
                             lines.append(f"  {full_label}({val_pairs[0]})")
                     else:
-                        for vp in val_pairs[:4]:
+                        for vp in val_pairs[:7]:
                             lines.append(f"  {full_label}({vp})")
-                # 合计行优先保留，其余按序截断（每 sheet 最多 40 行；板块明细行对分析价值高，放宽上限）
-                if len(lines) > 40:
-                    priority = [l for l in lines if "合计" in l or "总计" in l or "收益率" in l or "周转率" in l or "乘数" in l or "净利率" in l or "费用率" in l]
+                # 合计/比率/内外销/板块明细行优先保留，其余按序截断（每 sheet 最多 80 行）
+                if len(lines) > 160:
+                    priority = [l for l in lines if any(k in l for k in
+                                ("合计", "总计", "收益率", "周转率", "乘数", "净利率", "费用率",
+                                 "税负率", "内销", "外销", "氟化学", "锂电", "账龄",
+                                 "预算", "冲刺", "金额", "单价", "量·"))]
                     other = [l for l in lines if l not in priority]
-                    lines = priority + other[:(40 - len(priority))]
+                    lines = priority + other[:(160 - len(priority))]
                 if len(lines) > 1:
                     hdr = f"【{sname}】"
                     # 资金状况：强调期末值
