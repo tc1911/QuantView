@@ -83,7 +83,8 @@ Each node is just another `app.py` instance — it needs its own model (or `DEEP
 |---|---|
 | `GET /` | Serve `index.html` (no-cache headers) |
 | `POST /analyze` | Multipart `files` + `question` → `{result, images, mode, nodes}` (non-streaming; single-node and distributed) |
-| `POST /analyze/stream` | Same input, SSE stream of `{type: meta|progress|text|think|charts|error|done}` events (single-node and distributed) |
+| `POST /analyze/stream` | Same input, SSE stream of `{type: meta|progress|text|think|charts|error|done}` events (single-node and distributed). `meta` carries a `session` id for follow-up chat |
+| `POST /analyze/followup` | **二次追问**: JSON `{session, question}` → SSE `{type: text|think|error|done}`. Answers with the session's data context (hard numbers + file summaries) + conversation history via `_build_followup_prompt`; sessions kept in-memory (`_SESSIONS`, last 20) |
 | `POST /analyze/sheet` | **Accelerator-node job endpoint**: JSON `{prompt, max_tokens}` → `{result}`. Calls `_run_inference` non-streaming |
 | `POST /analyze/sheet/stream` | **Accelerator-node streaming endpoint**: same input, SSE `{type: text|think|error|done}` events; master forwards chunks to the browser so 中栏 cards fill in real time |
 | `POST /export/docx` | Receives HTML report JSON, spawns `export_docx.py` as a subprocess, returns the .docx |

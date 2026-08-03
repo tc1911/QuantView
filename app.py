@@ -586,14 +586,27 @@ def analyze():
     if not question:
         return jsonify({"error": "分析问题不能为空"}), 400
 
-    # 3. 执行分析
+    # 3. 保存文件字节（追问会话与分析共用）
+    from werkzeug.datastructures import FileStorage as _FS
+    file_buffers = []
+    fresh_files = []
+    for f in valid_files:
+        buf = io.BytesIO()
+        f.save(buf)
+        data = buf.getvalue()
+        file_buffers.append((f.filename, data))
+        fresh_files.append(_FS(stream=io.BytesIO(data), filename=f.filename))
+    session_id = _new_followup_session(file_buffers)
+
+    # 4. 执行分析
     try:
-        output = perform_analysis(valid_files, question)
+        output = perform_analysis(fresh_files, question)
         return jsonify({
             "result": output["result"],
             "images": output.get("images", []),
             "mode": output.get("mode", "single"),
             "nodes": output.get("nodes", []),
+            "session": session_id,
         })
     except Exception as e:
         return jsonify({"error": f"分析过程出错: {str(e)}"}), 500
@@ -1921,6 +1934,113 @@ def analyze_sheet_stream():
     )
 
 
+# ── 二次追问会话（像聊天一样继续提问） ──
+_SESSIONS = {}
+_MAX_SESSIONS = 20
+
+
+def _build_followup_context(file_buffers):
+    """构建追问会话的数据背景：硬数字 + 每文件摘要（控制总长度）。"""
+    from werkzeug.datastructures import FileStorage as _FS
+    parts = []
+    hard = extract_hard_numbers_from_bytes(file_buffers)
+    if hard:
+        parts.append("=== 硬数字（从Excel精确提取，禁止编造） ===\n" + "\n".join(hard))
+    for fname, data in file_buffers:
+        try:
+            filename, suffix, df = read_file(_FS(stream=io.BytesIO(data), filename=fname))
+            s = df_summary(filename, df)
+            parts.append(f"=== 文件 {filename} 摘要 ==="
+                         f"\n数据规模: {s['num_rows']} 行 × {s['num_cols']} 列"
+                         f"\n{s.get('sheet_overview', '')}"
+                         f"\n{s.get('per_sheet_summary', '')}"
+                         f"\n--- 文本列值分布 ---\n{s.get('dimensions_str', '')}"
+                         f"\n--- 缺失值 ---\n{s.get('missing_str', '')}")
+        except Exception as e:
+            print(f"[追问] 文件摘要失败 {fname}: {e}")
+    ctx = "\n\n".join(parts)
+    if len(ctx) > 30000:
+        ctx = ctx[:30000].rsplit("\n", 1)[0] + "\n（上下文过长已截断）"
+    return ctx
+
+
+def _new_followup_session(file_buffers):
+    """创建追问会话（内存存储，最多保留 _MAX_SESSIONS 个）。"""
+    session_id = os.urandom(8).hex()
+    try:
+        ctx = _build_followup_context(file_buffers)
+    except Exception as e:
+        print(f"[追问] 上下文构建失败: {e}")
+        ctx = ""
+    _SESSIONS[session_id] = {"context": ctx, "turns": [], "created": time.time()}
+    if len(_SESSIONS) > _MAX_SESSIONS:
+        oldest = min(_SESSIONS, key=lambda k: _SESSIONS[k]["created"])
+        _SESSIONS.pop(oldest, None)
+    return session_id
+
+
+def _build_followup_prompt(sess):
+    """追问 prompt：数据背景 + 对话历史 + 最新问题。"""
+    parts = [
+        "你是一位资深的企业经营数据分析师。请基于下面的数据背景和对话历史，回答用户的最新问题。",
+        "规则：引用具体数值（以硬数字为准），禁止编造；无数据支撑的明确说明；"
+        "回答用 Markdown，简洁直接，不超过 800 字。",
+        "",
+        "=== 数据背景 ===",
+        sess["context"] or "（无数据背景）",
+        "",
+        "=== 对话历史 ===",
+    ]
+    for role, content in sess["turns"][:-1]:
+        who = "用户" if role == "user" else "助手"
+        parts.append(f"{who}：{content[:2000]}")
+    parts.append("")
+    parts.append(f"=== 最新问题 ===\n{sess['turns'][-1][1]}")
+    return "\n".join(parts)
+
+
+@app.route("/analyze/followup", methods=["POST"])
+def analyze_followup():
+    """二次追问：基于会话的数据背景 + 对话历史流式回答（SSE）。"""
+    data = request.get_json(force=True, silent=True) or {}
+    session_id = (data.get("session") or "").strip()
+    question = (data.get("question") or "").strip()
+    if not session_id or not question:
+        return jsonify({"error": "缺少 session 或 question"}), 400
+    sess = _SESSIONS.get(session_id)
+    if not sess:
+        return jsonify({"error": "会话已失效（服务可能已重启），请重新发起分析"}), 404
+
+    sess["turns"].append(("user", question))
+    # 历史截断：保留最近 8 轮
+    if len(sess["turns"]) > 16:
+        sess["turns"] = sess["turns"][-16:]
+
+    def generate():
+        output = []
+        try:
+            for evt, chunk in _run_inference(_build_followup_prompt(sess), max_tokens=8192, stream=True):
+                if evt == "think":
+                    yield f"data: {json.dumps({'type': 'think', 'content': chunk}, ensure_ascii=False)}\n\n"
+                else:
+                    output.append(chunk)
+                    yield f"data: {json.dumps({'type': 'text', 'content': chunk}, ensure_ascii=False)}\n\n"
+        except Exception as e:
+            yield f"data: {json.dumps({'type': 'error', 'content': str(e)}, ensure_ascii=False)}\n\n"
+        finally:
+            yield "data: {\"type\": \"done\"}\n\n"
+            if output:
+                sess["turns"].append(("assistant", "".join(output)))
+                if len(sess["turns"]) > 16:
+                    sess["turns"] = sess["turns"][-16:]
+
+    return Response(
+        stream_with_context(generate()),
+        mimetype="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
 @app.route("/analyze/stream", methods=["POST"])
 def analyze_stream():
     """流式分析接口 — SSE 逐字推送模型输出。"""
@@ -1944,7 +2064,19 @@ def analyze_stream():
     if not question:
         return jsonify({"error": "分析问题不能为空"}), 400
 
-    # 2. 准备分析输入（分布式模式按工作表拆分任务）
+    # 2. 保存文件字节（追问会话与分析共用，FileStorage 流只能读一次）
+    from werkzeug.datastructures import FileStorage as _FS
+    file_buffers = []
+    fresh_files = []
+    for f in valid_files:
+        buf = io.BytesIO()
+        f.save(buf)
+        data = buf.getvalue()
+        file_buffers.append((f.filename, data))
+        fresh_files.append(_FS(stream=io.BytesIO(data), filename=f.filename))
+    valid_files = fresh_files
+
+    # 3. 准备分析输入（分布式模式按工作表拆分任务）
     distributed = bool(_distributed_nodes())
     try:
         if distributed:
@@ -1954,12 +2086,16 @@ def analyze_stream():
     except Exception as e:
         return jsonify({"error": f"数据准备失败: {str(e)}"}), 500
 
+    # 追问会话（含数据背景）
+    session_id = _new_followup_session(file_buffers)
+
     def generate():
         model_output_parts = []
         try:
-            # 推送模式标识（单节点/分布式），供前端展示徽标
+            # 推送模式标识（单节点/分布式）+ 追问会话 id，供前端展示徽标
             meta = {"type": "meta", "mode": "distributed" if distributed else "single",
-                    "nodes": [n["name"] for n in _distributed_nodes()]}
+                    "nodes": [n["name"] for n in _distributed_nodes()],
+                    "session": session_id}
             yield f"data: {json.dumps(meta, ensure_ascii=False)}\n\n"
 
             # 推送报告头

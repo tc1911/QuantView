@@ -782,6 +782,48 @@
     border: 1px dashed var(--border);
     border-radius: var(--radius);
   }
+  /* ── 二次追问聊天面板 ── */
+  .chat-panel {
+    display: none;
+    flex-direction: column;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--card-bg);
+    overflow: hidden;
+  }
+  .chat-panel.active { display: flex; }
+  .chat-panel .card-title { padding: 10px 14px; }
+  .chat-thread {
+    padding: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    max-height: 360px;
+    overflow-y: auto;
+  }
+  .chat-msg {
+    max-width: 92%;
+    padding: 8px 12px;
+    border-radius: 10px;
+    font-size: 13px;
+    line-height: 1.7;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+  }
+  .chat-msg.user { align-self: flex-end; background: var(--primary); color: #fff; }
+  .chat-msg.assistant { align-self: flex-start; background: var(--bg); border: 1px solid var(--border); color: var(--text); }
+  .chat-input-row { display: flex; gap: 8px; padding: 10px 12px; border-top: 1px solid var(--border); }
+  .chat-input-row input {
+    flex: 1;
+    min-width: 0;
+    padding: 8px 10px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--input-bg);
+    color: var(--text);
+    font-size: 13px;
+  }
+  .chat-input-row input:focus { outline: none; border-color: var(--primary); }
   .node-card {
     border: 1px solid var(--border);
     border-radius: var(--radius);
@@ -945,6 +987,16 @@
       </button>
     </div>
   </div>
+
+  <!-- 二次追问（聊天） -->
+  <div class="chat-panel" id="chatPanel">
+    <div class="card-title">继续追问</div>
+    <div class="chat-thread" id="chatThread"></div>
+    <div class="chat-input-row">
+      <input type="text" id="chatInput" placeholder="针对这份报告继续提问…（Enter 发送）">
+      <button class="btn-secondary" id="chatSendBtn">发送</button>
+    </div>
+  </div>
   </div><!-- /col-right -->
 
 </div><!-- /main-grid -->
@@ -1034,6 +1086,7 @@ console.log('[QuantView] JS loaded');
     hideError();
     clearMetaBadge();
     midReset('等待分析…');
+    chatReset();
   }
 
   function setLoading(loading) {
@@ -1186,6 +1239,7 @@ console.log('[QuantView] JS loaded');
     chartsContainer.innerHTML = '';
     clearMetaBadge();
     midReset('等待分析…');
+    chatReset();
 
     // Show streaming indicator
     loadingContainer.innerHTML = '<div class="spinner"></div>' +
@@ -1302,6 +1356,7 @@ console.log('[QuantView] JS loaded');
 
             if (data.type === 'meta') {
               currentMeta = data;
+              chatSessionId = data.session || null;
               renderMetaBadge(data);
               if (data.mode === 'distributed') {
                 midReset('等待任务分发…');
@@ -1483,6 +1538,9 @@ console.log('[QuantView] JS loaded');
               }
               document.getElementById('streamStatus').textContent = '分析完成';
               renderResult(finalOut);
+              // 分析完成 → 显示追问面板（会话有效时）
+              var cp = document.getElementById('chatPanel');
+              if (cp && chatSessionId) { cp.classList.add('active'); document.getElementById('chatInput').focus(); }
               loadingContainer.classList.remove('active');
               submitBtn.disabled = false;
               submitBtn.classList.remove('btn-stop');
@@ -1780,6 +1838,12 @@ console.log('[QuantView] JS loaded');
     window.scrollTo({ top: 0, behavior: 'smooth' });
   });
 
+  // ── 二次追问：发送按钮 + Enter ──
+  document.getElementById('chatSendBtn').addEventListener('click', chatSend);
+  document.getElementById('chatInput').addEventListener('keydown', function (e) {
+    if (e.key === 'Enter') { e.preventDefault(); chatSend(); }
+  });
+
   // ── 分析模式徽标（单节点 / 分布式 + 节点列表 + 分项进度） ──
   function renderMetaBadge(meta) {
     var el = document.getElementById('analysisMeta');
@@ -1869,6 +1933,87 @@ console.log('[QuantView] JS loaded');
     if (ov) midAddCard('总览与综合结论', '主节点', ov[1].trim());
     if (!midCards.length) { midReset('无分节点内容'); return; }
     midRender();
+  }
+
+  // ── 二次追问聊天 ──
+  var chatSessionId = null;
+  var chatBusy = false;
+
+  function chatAppend(role, text) {
+    var t = document.getElementById('chatThread');
+    var m = document.createElement('div');
+    m.className = 'chat-msg ' + role;
+    if (text) m.innerHTML = renderMarkdown(text);
+    t.appendChild(m);
+    t.scrollTop = t.scrollHeight;
+    return m;
+  }
+
+  function chatReset() {
+    chatSessionId = null;
+    chatBusy = false;
+    var cp = document.getElementById('chatPanel');
+    if (cp) cp.classList.remove('active');
+    var t = document.getElementById('chatThread');
+    if (t) t.innerHTML = '';
+    var inp = document.getElementById('chatInput');
+    if (inp) inp.value = '';
+  }
+
+  function chatSend() {
+    var inp = document.getElementById('chatInput');
+    var q = inp.value.trim();
+    if (!q || !chatSessionId || chatBusy) return;
+    chatBusy = true;
+    inp.value = '';
+    chatAppend('user', q);
+    var bubble = chatAppend('assistant', '');
+    var full = '';
+    var lastRender = 0;
+
+    function renderBubble() {
+      if (bubble.parentNode) bubble.innerHTML = renderMarkdown(full);
+      var t = document.getElementById('chatThread');
+      if (t) t.scrollTop = t.scrollHeight;
+    }
+    function scheduleRender() {
+      var now = Date.now();
+      if (now - lastRender > 200) { lastRender = now; renderBubble(); }
+      else { setTimeout(renderBubble, 200); }
+    }
+
+    fetch('/analyze/followup', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session: chatSessionId, question: q })
+    }).then(function (r) {
+      if (!r.ok) {
+        return r.json().then(function (e) { throw new Error(e.error || 'HTTP ' + r.status); });
+      }
+      var reader = r.body.getReader();
+      var decoder = new TextDecoder();
+      var buffer = '';
+      function read() {
+        return reader.read().then(function (res) {
+          if (res.done) { renderBubble(); chatBusy = false; return; }
+          buffer += decoder.decode(res.value, { stream: true });
+          var lines = buffer.split('\n');
+          buffer = lines.pop();
+          lines.forEach(function (line) {
+            if (!line.startsWith('data: ')) return;
+            var d; try { d = JSON.parse(line.substring(6)); } catch (e) { return; }
+            if (d.type === 'text') { full += d.content; scheduleRender(); }
+            else if (d.type === 'error') { full += '\n⚠️ ' + d.content; }
+          });
+          return read();
+        });
+      }
+      return read();
+    }).catch(function (err) {
+      full = '⚠️ ' + (err.message || '网络错误');
+      renderBubble();
+      chatBusy = false;
+    });
   }
 
   // ── History management ──
