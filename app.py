@@ -1605,7 +1605,10 @@ def _distributed_analysis_events(prep, question, output_parts, stop_event=None):
     for node in workers:
         threading.Thread(target=_node_worker, args=(node,), daemon=True).start()
 
+    deliver_cnt = 0
+    t0_consume = time.time()
     for t in tasks:
+        print(f"[分布式] 开始投递任务 {done + 1}/{total}：{t['label'][:24]} @ {time.strftime('%H:%M:%S')}")
         q = task_queues[id(t)]
         node = None
         parts = []
@@ -1621,6 +1624,9 @@ def _distributed_analysis_events(prep, question, output_parts, stop_event=None):
                     chunk = calc_streamer.feed(chunk)
                     output_parts.append(chunk)
                     parts.append(chunk)
+                    deliver_cnt += 1
+                    if deliver_cnt % 100 == 0:
+                        print(f"[分布式] 已投递 {deliver_cnt} 块（{t['label'][:16]}）@ {time.strftime('%H:%M:%S')}")
                     yield ("text", chunk)
             elif kind == "error":
                 failures += 1
@@ -1633,6 +1639,7 @@ def _distributed_analysis_events(prep, question, output_parts, stop_event=None):
         if parts and node is not None:
             sections.append((t["label"], node["name"], "".join(parts).strip()))
         done += 1
+        print(f"[分布式] 任务完成 {done}/{total}：{t['label'][:24]}（本任务 {len(parts)} 字符，累计投递 {deliver_cnt} 块，耗时 {time.time()-t0_consume:.0f}s）")
         yield ("progress", {"done": done, "total": total})
 
     # ── 主节点生成总览 ──
