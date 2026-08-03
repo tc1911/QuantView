@@ -669,71 +669,6 @@
     color: var(--text-muted);
   }
 
-  /* ── History Sidebar ── */
-  .history-sidebar {
-    position: fixed;
-    left: 0; top: 56px; bottom: 0;
-    width: 260px;
-    background: var(--card-bg);
-    border-right: 1px solid var(--border);
-    overflow-y: auto;
-    z-index: 90;
-    transform: translateX(-100%);
-    transition: transform 0.25s ease;
-    display: flex; flex-direction: column;
-  }
-  .history-sidebar.open { transform: translateX(0); }
-  .history-toggle {
-    position: fixed; left: 0; top: 100px;
-    background: var(--card-bg);
-    border: 1px solid var(--border);
-    border-left: none;
-    border-radius: 0 var(--radius) var(--radius) 0;
-    padding: 10px 6px;
-    cursor: pointer;
-    z-index: 91;
-    color: var(--text-secondary);
-    font-size: 12px;
-    writing-mode: vertical-rl;
-    letter-spacing: 2px;
-    transition: left 0.25s ease;
-  }
-  .history-sidebar.open ~ .history-toggle,
-  .history-sidebar.open + .history-toggle { left: 260px; }
-  .history-header {
-    padding: 14px 16px;
-    font-size: 14px; font-weight: 600;
-    color: var(--text);
-    border-bottom: 1px solid var(--border);
-    display: flex; align-items: center; justify-content: space-between;
-    flex-shrink: 0;
-  }
-  .history-clear {
-    font-size: 11px; color: var(--text-muted); cursor: pointer;
-    background: none; border: none;
-  }
-  .history-clear:hover { color: var(--error); }
-  .history-list { flex: 1; overflow-y: auto; padding: 8px; }
-  .history-item {
-    padding: 10px 12px;
-    border-radius: 6px;
-    cursor: pointer;
-    margin-bottom: 6px;
-    border: 1px solid transparent;
-    transition: all 0.15s;
-    font-size: 12px;
-  }
-  .history-item:hover { background: var(--bg); border-color: var(--border); }
-  .history-item.selected { border-color: var(--primary); background: var(--primary-light); }
-  .history-item-title {
-    font-weight: 600; color: var(--text);
-    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-  }
-  .history-item-meta {
-    font-size: 11px; color: var(--text-muted); margin-top: 2px;
-    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-  }
-
   /* ── Dark Mode overrides ── */
   [data-theme="dark"] .security-banner {
     background: linear-gradient(135deg, #1e3a5f 0%, #0f2a1e 100%);
@@ -886,16 +821,6 @@
     <span class="header-badge">本地分析 · 数据安全</span>
   </div>
 </header>
-
-<!-- History Sidebar -->
-<div class="history-sidebar" id="historySidebar">
-  <div class="history-header">
-    历史记录
-    <button class="history-clear" id="historyClear" title="清空历史">清空</button>
-  </div>
-  <div class="history-list" id="historyList"></div>
-</div>
-<button class="history-toggle" id="historyToggle">历史记录</button>
 
 <!-- Security Banner -->
 <div class="security-banner">
@@ -1055,10 +980,6 @@ console.log('[QuantView] JS loaded');
   const copyBtn = document.getElementById('copyBtn');
   const downloadBtn = document.getElementById('downloadBtn');
   const newAnalysisBtn = document.getElementById('newAnalysisBtn');
-  const historySidebar = document.getElementById('historySidebar');
-  const historyToggle = document.getElementById('historyToggle');
-  const historyList = document.getElementById('historyList');
-  const historyClear = document.getElementById('historyClear');
 
   let selectedFiles = [];
 
@@ -1265,11 +1186,6 @@ console.log('[QuantView] JS loaded');
     var controller = new AbortController();
     currentAbortController = controller;
 
-    // Create session
-    var q = question;
-    var fnames = selectedFiles.map(function (fi) { return fi.name; });
-    createSession(q, fnames, controller);
-
     var fullText = '';
     var thinkText = '';
     var inThink = true;  // GGUF: first chunks are think; switches to false on </think>
@@ -1448,15 +1364,6 @@ console.log('[QuantView] JS loaded');
 
               if (chunk) {
                 fullText += chunk;
-                // Real-time update to active session
-                if (activeSid) { var cs = getSession(activeSid); if (cs && cs.status === 'running') { cs.outputText = fullText; cs.thinkText = thinkText; } }
-                // 节流持久化运行中会话（刷新后保留部分输出）
-                if (!window._persistTimer) {
-                  window._persistTimer = setTimeout(function () {
-                    window._persistTimer = null;
-                    persistSessions();
-                  }, 2000);
-                }
                 // 单节点：流式渲染（150ms 节流）；分布式：右栏只累计，完成时整体显示
                 if (!(currentMeta && currentMeta.split) && !window._renderTimer) {
                   window._renderTimer = setTimeout(function () {
@@ -1500,13 +1407,6 @@ console.log('[QuantView] JS loaded');
             } else if (data.type === 'error') {
               showError(data.content);
             } else if (data.type === 'done') {
-              // Save to history
-              var question = questionInput.value.trim();
-              var filenames = selectedFiles.map(function (f) { return f.name; });
-              var imgData = [];
-              chartsContainer.querySelectorAll('.chart-item img').forEach(function (img) {
-                imgData.push([img.alt || '图表', img.src]);
-              });
               // Combine think (from SSE events) + output for final render
               var finalOut;
               if (thinkText && !fullText) {
@@ -1520,13 +1420,10 @@ console.log('[QuantView] JS loaded');
               }
               // Flush pending render
               if (window._renderTimer) { clearTimeout(window._renderTimer); window._renderTimer = null; }
-              if (window._persistTimer) { clearTimeout(window._persistTimer); window._persistTimer = null; }
               if (window._midTimer) { clearTimeout(window._midTimer); window._midTimer = null; }
               midRender();
               (document.getElementById('streamOutput') || {}).innerHTML = renderMarkdown(fullText);
 
-              // Save to session
-              if (activeSid) { var cur = getSession(activeSid); if (cur) { cur.thinkText = thinkText; cur.outputText = fullText; cur.images = imgData; cur.status = 'done'; cur.controller = null; cur.meta = currentMeta; persistSessions(); } }
               var mbar = document.getElementById('metaProgressBar');
               if (lastProgress) {
                 var mp = document.getElementById('metaProgress');
@@ -1920,21 +1817,6 @@ console.log('[QuantView] JS loaded');
     }
   }
 
-  // 会话回放：从保存的完整报告文本中重建各节点卡片
-  function midRebuildFromText(text) {
-    midReset('');
-    if (!text) return;
-    var re = /^### 工作表「(.+?)」分析（节点：(.+?)）\n\n([\s\S]*?)(?=^### 工作表「|^## 总览与综合结论|$)/gm;
-    var m;
-    while ((m = re.exec(text)) !== null) {
-      midAddCard(m[1], m[2], m[3].trim());
-    }
-    var ov = text.match(/^## 总览与综合结论（主节点生成）\n\n([\s\S]*?)(?=^### 工作表「|$)/m);
-    if (ov) midAddCard('总览与综合结论', '主节点', ov[1].trim());
-    if (!midCards.length) { midReset('无分节点内容'); return; }
-    midRender();
-  }
-
   // ── 二次追问聊天 ──
   var chatSessionId = null;
   var chatBusy = false;
@@ -1967,9 +1849,6 @@ console.log('[QuantView] JS loaded');
     chatBusy = true;
     inp.value = '';
     chatAppend('user', q);
-    // 追问记录写入当前会话（随会话持久化到 localStorage，回放时恢复）
-    var active0 = getSession(activeSid);
-    if (active0) { active0.chat = active0.chat || []; active0.chat.push({ role: 'user', text: q }); persistSessions(); }
     var bubble = chatAppend('assistant', '');
     var full = '';
     var lastRender = 0;
@@ -1988,10 +1867,6 @@ console.log('[QuantView] JS loaded');
       if (now - lastRender > 200) { lastRender = now; renderBubble(); }
       else { setTimeout(renderBubble, 200); }
     }
-    function saveChat() {
-      var s = getSession(activeSid);
-      if (s) { s.chat = s.chat || []; s.chat.push({ role: 'assistant', text: full || '（无回复）' }); persistSessions(); }
-    }
 
     fetch('/analyze/followup', {
       method: 'POST',
@@ -2006,7 +1881,7 @@ console.log('[QuantView] JS loaded');
       var buffer = '';
       function read() {
         return reader.read().then(function (res) {
-          if (res.done) { renderBubble(); chatBusy = false; saveChat(); return; }
+          if (res.done) { renderBubble(); chatBusy = false; return; }
           buffer += decoder.decode(res.value, { stream: true });
           var lines = buffer.split('\n');
           buffer = lines.pop();
@@ -2024,146 +1899,16 @@ console.log('[QuantView] JS loaded');
       full = '⚠️ ' + (err.message || '网络错误');
       renderBubble();
       chatBusy = false;
-      saveChat();
-    });
-  }
-
-  // ── History management ──
-  var SESSIONS_KEY = 'deepanalyze-sessions';
-  // 运行中的会话也持久化（定时保存部分输出），刷新后恢复为"中断"状态
-  function persistSessions() { var ts = sessions.filter(function(s){return s.status==='done'||s.status==='running';}); try{localStorage.setItem(SESSIONS_KEY,JSON.stringify(ts.slice(0,50)));}catch(e){} }
-
-  function loadPersisted() {
-    try {
-      var list = JSON.parse(localStorage.getItem(SESSIONS_KEY)) || [];
-      // 刷新前仍在运行的会话，其流已被页面关闭掐断 → 标记为中断
-      return list.map(function (s) {
-        if (s.status === 'running') { s.status = 'interrupted'; s.controller = null; }
-        return s;
-      });
-    } catch (e) { return []; }
-  }
-
-  function createSession(question, filenames, ctrl) {
-    var sid = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
-    var s = { id: sid, question: question, files: filenames, time: new Date().toLocaleString('zh-CN'),
-      thinkText: '', outputText: '', images: [], status: 'running', controller: ctrl, meta: null };
-    sessions.unshift(s); activeSid = sid; renderSessionList(); return s;
-  }
-
-  function getSession(sid) {
-    for (var i = 0; i < sessions.length; i++) { if (sessions[i].id === sid) return sessions[i]; } return null;
-  }
-
-  function switchToSession(sid) {
-    if (sid === activeSid) return;
-    activeSid = sid;
-    var s = getSession(sid) || loadPersisted().find(function (ps) { return ps.id === sid; });
-    if (!s) return;
-    resultSection.classList.add('active');
-    clearMetaBadge();
-    if (s.meta) renderMetaBadge(s.meta);
-    if (s.status === 'running') {
-      loadingContainer.classList.add('active');
-      submitBtn.disabled = false; submitBtn.textContent = '停止分析'; submitBtn.classList.add('btn-stop');
-      resultContent.innerHTML = '<div class="output-block" id="streamOutput">' + renderMarkdown(s.outputText) + '</div>';
-      if (s.thinkText) {
-        var tb = document.createElement('div'); tb.className = 'think-block open';
-        tb.innerHTML = '<button class="think-toggle"><span class="arrow">&#9660;</span> 思考中</button><div class="think-content">' + s.thinkText + '</div>';
-        resultContent.insertBefore(tb, resultContent.firstChild);
-      }
-    } else {
-      loadingContainer.classList.remove('active');
-      submitBtn.disabled = false; submitBtn.classList.remove('btn-stop');
-      submitBtn.innerHTML = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg> 开始分析';
-      var notice = '';
-      if (s.status === 'interrupted') {
-        notice = '<div style="padding:10px 14px;margin-bottom:12px;border:1px solid var(--warning);border-radius:var(--radius);background:var(--bg);color:var(--warning);font-size:13px;">⚠️ 该分析在中断前未完成（页面刷新或停止导致），以下为中断时的部分输出，可重新发起分析。</div>';
-      }
-      var fo = notice + (s.thinkText ? '<think>' + s.thinkText + '</think>\n' : '') + s.outputText;
-      renderResult(fo);
-      chartsContainer.innerHTML = '';
-      (s.images || []).forEach(function (img) {
-        var item = document.createElement('div'); item.className = 'chart-item';
-        var h = document.createElement('div'); h.className = 'chart-item-header'; h.textContent = img[0] || '图表';
-        var ie = document.createElement('img'); ie.src = img[1]; ie.alt = img[0] || '图表'; ie.loading = 'lazy';
-        item.appendChild(h); item.appendChild(ie); chartsContainer.appendChild(item);
-      });
-      // 中栏回放：分布式会话重建各节点卡片
-      if (s.meta && s.meta.split) {
-        midRebuildFromText(s.outputText);
-      } else {
-        midReset('单节点模式：无分节点工作内容');
-      }
-    }
-    // 追问会话恢复：meta.session 存在即可继续追问（服务端会话已落盘，重启后仍有效）
-    chatSessionId = (s.meta && s.meta.session) || null;
-    chatBusy = false;
-    var cp2 = document.getElementById('chatPanel');
-    var ct2 = document.getElementById('chatThread');
-    if (ct2) ct2.innerHTML = '';
-    if (chatSessionId && cp2) {
-      (s.chat || []).forEach(function (m) {
-        var d2 = document.createElement('div');
-        d2.className = 'chat-msg ' + (m.role === 'user' ? 'user' : 'assistant');
-        if (m.text) d2.innerHTML = renderMarkdown(m.text);
-        ct2.appendChild(d2);
-      });
-      cp2.classList.add('active');
-    } else if (cp2) {
-      cp2.classList.remove('active');
-    }
-    resultSection.scrollIntoView({ behavior: 'smooth', block: 'start' });
-    renderSessionList();
-  }
-
-  function renderSessionList() {
-    var p = loadPersisted();
-    var all = sessions.concat(p.filter(function (ps) { return !sessions.some(function (s) { return s.id === ps.id; }); }));
-    historyList.innerHTML = '';
-    if (!all.length) { historyList.innerHTML = '<div style="padding:20px;text-align:center;color:var(--text-muted);font-size:12px;">-</div>'; return; }
-    all.forEach(function (s) {
-      var item = document.createElement('div'); item.className = 'history-item';
-      if (s.id === activeSid) item.classList.add('selected');
-      var dot = s.status === 'running' ? '<span style="color:var(--primary);">● </span>'
-        : (s.status === 'interrupted' ? '<span style="color:var(--warning);">◌ </span>' : '');
-      var tag = s.status === 'interrupted' ? ' · <span style="color:var(--warning);">中断</span>' : '';
-      item.innerHTML = dot + '<div class="history-item-title">' + escHtml(s.question.substring(0, 35)) + '</div>' +
-        '<div class="history-item-meta">' + escHtml((s.files || []).join(', ').substring(0, 25)) + ' · ' + s.time + tag + '</div>';
-      item.addEventListener('click', function () { switchToSession(s.id); });
-      historyList.appendChild(item);
     });
   }
 
   function escHtml(str) { var d = document.createElement('div'); d.textContent = str || ''; return d.innerHTML; }
 
-  function loadHistoryEntry(idx) { switchToSession(sessions[idx] ? sessions[idx].id : null); }
-
-  historyToggle.addEventListener('click', function () { historySidebar.classList.toggle('open'); });
-  historyClear.addEventListener('click', function () {
-    if (confirm('清空所有会话？')) { sessions = []; activeSid = null; localStorage.removeItem(SESSIONS_KEY); renderSessionList(); resultSection.classList.remove('active'); }
-  });
-
-  var sessions = []; var activeSid = null; renderSessionList();
-
   // ── Download as .md ──
   downloadBtn.addEventListener('click', function () {
     var text = '';
-    // Use session data if available, otherwise scrape DOM
-    var thinkBlock = resultContent.querySelector('.think-block');
-    var thinkVisible = thinkBlock && thinkBlock.classList.contains('open');
-
-    if (activeSid) {
-      var s = getSession(activeSid) || loadPersisted().find(function(ps){return ps.id===activeSid;});
-      if (s) {
-        if (thinkVisible && s.thinkText) text += '> 思考过程\n\n' + s.thinkText + '\n\n---\n\n';
-        text += s.outputText || '';
-      }
-    }
-    if (!text) {
-      var ob = resultContent.querySelector('.output-block');
-      if (ob) text = ob.textContent || '';
-    }
+    var ob = resultContent.querySelector('.output-block');
+    if (ob) text = ob.textContent || '';
     if (!text) text = resultContent.textContent || '';
 
     var blob = new Blob([text], { type: 'text/markdown;charset=utf-8' });
@@ -2183,14 +1928,10 @@ console.log('[QuantView] JS loaded');
       if (!html) { showError('无内容可导出'); return; }
       // 把 chartjson 代码块替换为已渲染的图表图片（按图表标题匹配，匹配不到的块直接移除）
       var images = [];
-      var cur = getSession(activeSid);
-      if (cur && cur.images) images = cur.images;
-      if (!images.length) {
-        chartsContainer.querySelectorAll('.chart-item').forEach(function (it) {
-          var im = it.querySelector('img');
-          if (im) images.push([im.alt || '图表', im.src]);
-        });
-      }
+      chartsContainer.querySelectorAll('.chart-item').forEach(function (it) {
+        var im = it.querySelector('img');
+        if (im) images.push([im.alt || '图表', im.src]);
+      });
       html = html.replace(/<pre><code class="lang-chartjson">[\s\S]*?<\/code><\/pre>/g, function (m) {
         var raw = m.replace(/^<pre><code class="lang-chartjson">/, '').replace(/<\/code><\/pre>$/, '')
                    .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
