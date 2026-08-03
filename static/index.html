@@ -1936,8 +1936,14 @@ console.log('[QuantView] JS loaded');
     var full = '';
     var lastRender = 0;
     var gotChunk = false;
-    // 模型可能需数秒才开始输出（大上下文预填充）——立即显示"正在回答…"，避免看起来无反应
+    // 模型可能需数秒~数分钟才开始输出（大上下文预填充）——立即显示"正在回答…"并每秒更新等待时长，避免看起来无反应
     renderBubble();
+    var waitStart = Date.now();
+    var waitTimer = setInterval(function () {
+      if (full || !bubble.parentNode) { clearInterval(waitTimer); return; }
+      var secs = Math.round((Date.now() - waitStart) / 1000);
+      bubble.innerHTML = '<span style="color:var(--text-muted);">正在回答…（已等待 ' + secs + ' 秒，模型预填充较慢属正常）</span>';
+    }, 1000);
     // 若长时间收不到任何内容，提示可能仍在处理/排队，避免用户误以为卡死
     var slowTimer = setTimeout(function () {
       if (!gotChunk && bubble.parentNode) {

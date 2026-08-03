@@ -1891,8 +1891,9 @@ def _build_followup_context(file_buffers):
         except Exception as e:
             print(f"[追问] 文件摘要失败 {fname}: {e}")
     ctx = "\n\n".join(parts)
-    if len(ctx) > 30000:
-        ctx = ctx[:30000].rsplit("\n", 1)[0] + "\n（上下文过长已截断）"
+    # 控制总长度：27B 模型大上下文预填充很慢，追问只需核对硬数字，截掉冗余逐表统计
+    if len(ctx) > 10000:
+        ctx = ctx[:10000].rsplit("\n", 1)[0] + "\n（上下文过长已截断）"
     return ctx
 
 
@@ -1932,13 +1933,13 @@ def _build_followup_prompt(sess):
         sess["context"] or "（无数据背景）",
         "",
         "=== 之前的分析报告（仅供引用与修正，不要重述） ===",
-        (sess.get("report") or "（无）")[:8000],
+        (sess.get("report") or "（无）")[:4000],
         "",
         "=== 对话历史 ===",
     ]
     for role, content in sess["turns"][:-1]:
         who = "用户" if role == "user" else "助手"
-        parts.append(f"{who}：{content[:2000]}")
+        parts.append(f"{who}：{content[:1000]}")
     parts.append("")
     parts.append(f"=== 最新问题 ===\n{sess['turns'][-1][1]}")
     return "\n".join(parts)
