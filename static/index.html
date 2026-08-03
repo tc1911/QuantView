@@ -1998,13 +1998,13 @@ console.log('[QuantView] JS loaded');
     ball.classList.toggle('show', !!chatSessionId && !panel.classList.contains('active'));
   }
 
-  // 临时诊断条：固定在页面顶部，追加式记录（可滚动），任何情况下都能看到追问各步骤的执行情况
+  // 临时诊断条：默认隐藏、后台持续记录；点击底部 footer 的"QuantView"切换显示/隐藏
   function diagLog(msg) {
     var el = document.getElementById('diagStrip');
     if (!el) {
       el = document.createElement('div');
       el.id = 'diagStrip';
-      el.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:99999;background:#111;color:#0f0;font:12px/1.5 monospace;padding:4px 8px;white-space:pre-wrap;max-height:40vh;overflow-y:auto;';
+      el.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:99999;background:#111;color:#0f0;font:12px/1.5 monospace;padding:4px 8px;white-space:pre-wrap;max-height:40vh;overflow-y:auto;display:none;';
       document.body.appendChild(el);
     }
     var line = document.createElement('div');
@@ -2012,6 +2012,12 @@ console.log('[QuantView] JS loaded');
     el.appendChild(line);
     el.scrollTop = el.scrollHeight;
   }
+  var footerEl = document.querySelector('.footer');
+  if (footerEl) footerEl.style.cursor = 'pointer';
+  if (footerEl) footerEl.addEventListener('click', function () {
+    var el = document.getElementById('diagStrip');
+    if (el) el.style.display = (el.style.display === 'none') ? 'block' : 'none';
+  });
 
   function chatSend(optQ) {
     var inp = document.getElementById('chatInput');
