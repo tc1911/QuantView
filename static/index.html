@@ -1916,16 +1916,19 @@ console.log('[QuantView] JS loaded');
     if (inp) inp.value = '';
   }
 
-  // 临时诊断条：固定在页面顶部，任何情况下都能看到追问各步骤的执行情况
+  // 临时诊断条：固定在页面顶部，追加式记录（可滚动），任何情况下都能看到追问各步骤的执行情况
   function diagLog(msg) {
     var el = document.getElementById('diagStrip');
     if (!el) {
       el = document.createElement('div');
       el.id = 'diagStrip';
-      el.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:99999;background:#111;color:#0f0;font:12px/1.5 monospace;padding:4px 8px;white-space:pre-wrap;';
+      el.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:99999;background:#111;color:#0f0;font:12px/1.5 monospace;padding:4px 8px;white-space:pre-wrap;max-height:40vh;overflow-y:auto;';
       document.body.appendChild(el);
     }
-    el.textContent = new Date().toISOString().slice(11, 19) + ' ' + msg;
+    var line = document.createElement('div');
+    line.textContent = new Date().toISOString().slice(11, 19) + ' ' + msg;
+    el.appendChild(line);
+    el.scrollTop = el.scrollHeight;
   }
 
   function chatSend(optQ) {
