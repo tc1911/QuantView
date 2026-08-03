@@ -37,6 +37,11 @@ Useful deps: `flask pandas matplotlib numpy` (required); `openpyxl` (required �
 | `DEEPANALYZE_HEADLESS` | `1/true` → 无头加速节点模式：不提供 Web 界面（`GET /` 返回 404 提示），仅保留 `/analyze/sheet` 任务接口，控制台逐任务打印收到/完成/耗时 |
 | `DEEPANALYZE_CONTEXT` | llama-server 上下文长度（默认 65536）。同机多实例时加速节点建议 32768 省内存（32B 模型 64K KV 缓存约 16GB） |
 | `DEEPANALYZE_NGL` | llama-server GPU 显存层数（默认 99 全量卸载）。显存不足报 `ErrorOutOfDeviceMemory`/KV 缓存分配失败时调低（如 60/30），0 = 纯 CPU |
+| `DEEPANALYZE_MAIL_TO` | 分析完成邮件收件人（逗号分隔多个）。**设置后才启用邮件功能**；附件为报告 .md + 图表 zip |
+| `DEEPANALYZE_MAIL_SMTP` | SMTP 服务器地址（如 `smtp.qq.com`）。未设置则跳过邮件 |
+| `DEEPANALYZE_MAIL_PORT` | SMTP 端口（默认 465=SSL；其他端口用 STARTTLS） |
+| `DEEPANALYZE_MAIL_USER` / `DEEPANALYZE_MAIL_PASS` | SMTP 登录账号/授权码（QQ/163 等需用授权码而非登录密码） |
+| `DEEPANALYZE_MAIL_FROM` | 发件人地址（默认同 USER） |
 
 ## Architecture
 

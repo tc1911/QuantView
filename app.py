@@ -487,6 +487,91 @@ def index():
     return resp
 
 
+def _send_report_email(question, filenames, full_output, charts=None):
+    """分析完成后把报告发到配置的邮箱（异步线程调用；未配置收件人则跳过）。
+
+    环境变量: DEEPANALYZE_MAIL_TO(收件人，逗号分隔) DEEPANALYZE_MAIL_SMTP(服务器)
+    DEEPANALYZE_MAIL_PORT(默认465) DEEPANALYZE_MAIL_USER DEEPANALYZE_MAIL_PASS
+    DEEPANALYZE_MAIL_FROM(默认同 USER)。465=SSL，其余端口=STARTTLS。
+    附件：报告全文 .md + 全部图表 PNG 打包 zip。发送失败只打日志，不影响主流程。
+    """
+    import smtplib
+    import zipfile
+    import html as _html
+    from email.mime.text import MIMEText
+    from email.mime.multipart import MIMEMultipart
+    from email.mime.application import MIMEApplication
+
+    to = os.environ.get("DEEPANALYZE_MAIL_TO", "").strip()
+    if not to:
+        return  # 未配置收件人，不启用邮件
+    smtp_host = os.environ.get("DEEPANALYZE_MAIL_SMTP", "").strip()
+    if not smtp_host:
+        print("[邮件] 未配置 DEEPANALYZE_MAIL_SMTP，跳过邮件发送")
+        return
+    try:
+        port = int(os.environ.get("DEEPANALYZE_MAIL_PORT", "465") or 465)
+    except ValueError:
+        port = 465
+    user = os.environ.get("DEEPANALYZE_MAIL_USER", "").strip() or None
+    pwd = os.environ.get("DEEPANALYZE_MAIL_PASS", "").strip() or None
+    frm = os.environ.get("DEEPANALYZE_MAIL_FROM", "").strip() or user or to.split(",")[0].strip()
+
+    try:
+        msg = MIMEMultipart()
+        msg["From"] = frm
+        msg["To"] = to
+        msg["Subject"] = f"【QuantView】数据分析报告已完成 {time.strftime('%Y-%m-%d %H:%M')}"
+        body = (
+            "<h3>QuantView 数据分析报告已生成</h3>"
+            f"<p><b>分析问题：</b>{_html.escape(question)}</p>"
+            f"<p><b>分析文件：</b>{_html.escape('、'.join(filenames))}</p>"
+            f"<p><b>完成时间：</b>{time.strftime('%Y-%m-%d %H:%M:%S')}</p>"
+            "<p>报告全文与图表见附件。</p>"
+        )
+        msg.attach(MIMEText(body, "html", "utf-8"))
+
+        # 报告全文 .md
+        md_part = MIMEText(full_output, "plain", "utf-8")
+        md_part.add_header("Content-Disposition", "attachment",
+                           filename=("utf-8", "", f"QuantView_报告_{time.strftime('%Y-%m-%d')}.md"))
+        msg.attach(md_part)
+
+        # 图表打包 zip
+        if charts:
+            zip_buf = io.BytesIO()
+            with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
+                for idx, (title, b64) in enumerate(charts, 1):
+                    try:
+                        png = base64.b64decode(str(b64).split(",", 1)[-1])
+                        zf.writestr(f"图表_{idx:02d}.png", png)
+                    except Exception:
+                        continue
+            zip_buf.seek(0)
+            zip_part = MIMEApplication(zip_buf.read(), _subtype="zip")
+            zip_part.add_header("Content-Disposition", "attachment",
+                                filename=("utf-8", "", f"QuantView_图表_{time.strftime('%Y-%m-%d')}.zip"))
+            msg.attach(zip_part)
+
+        if port == 465:
+            server = smtplib.SMTP_SSL(smtp_host, port, timeout=30)
+        else:
+            server = smtplib.SMTP(smtp_host, port, timeout=30)
+            try:
+                server.starttls()
+            except smtplib.SMTPException:
+                pass
+        try:
+            if user:
+                server.login(user, pwd)
+            server.sendmail(frm, [x.strip() for x in to.split(",") if x.strip()], msg.as_string())
+        finally:
+            server.quit()
+        print(f"[邮件] 已发送分析报告到 {to}")
+    except Exception as e:
+        print(f"[邮件] 发送失败: {e}")
+
+
 @app.route("/analyze", methods=["POST"])
 def analyze():
     """数据分析接口
@@ -538,6 +623,14 @@ def analyze():
         output = perform_analysis(fresh_files, question)
         _SESSIONS[session_id]["report"] = output["result"]
         _persist_session(session_id)
+        # 完成 → 异步发送邮件（可选，未配置收件人时自动跳过）
+        try:
+            threading.Thread(target=_send_report_email,
+                             args=(question, [f[0] for f in file_buffers],
+                                   output["result"], output.get("images", [])),
+                             daemon=True).start()
+        except Exception:
+            pass
         return jsonify({
             "result": output["result"],
             "images": output.get("images", []),
@@ -1894,6 +1987,14 @@ def analyze_stream():
 
             if all_charts:
                 yield f"data: {json.dumps({'type': 'charts', 'images': all_charts}, ensure_ascii=False)}\n\n"
+
+            # 分析完成 → 异步发送邮件（可选，未配置收件人时自动跳过）
+            try:
+                threading.Thread(target=_send_report_email,
+                                 args=(question, prep["filenames"], full_output, all_charts),
+                                 daemon=True).start()
+            except Exception:
+                pass
 
         except Exception as e:
             import traceback
