@@ -1763,7 +1763,11 @@ console.log('[QuantView] JS loaded');
   // ── 二次追问：发送按钮 + Enter ──
   document.getElementById('chatSendBtn').addEventListener('click', chatSend);
   document.getElementById('chatInput').addEventListener('keydown', function (e) {
-    if (e.key === 'Enter') { e.preventDefault(); chatSend(); }
+    if (e.key !== 'Enter') return;
+    // 中文输入法组合期间按 Enter 是确认选词，不发送也不阻止默认行为，
+    // 否则选词确认被吞掉、文字永远进不了输入框（表现为"追问发不出去"）
+    if (e.isComposing || e.keyCode === 229) return;
+    e.preventDefault(); chatSend();
   });
 
   // ── 分析模式徽标（单节点 / 分布式 + 节点列表 + 分项进度） ──
@@ -1871,7 +1875,14 @@ console.log('[QuantView] JS loaded');
   function chatSend() {
     var inp = document.getElementById('chatInput');
     var q = inp.value.trim();
-    if (!q || !chatSessionId || chatBusy) return;
+    if (!q || chatBusy) return;
+    if (!chatSessionId) {
+      // 会话不可用时给出可见提示，避免静默无反应
+      inp.value = '';
+      var nb = chatAppend('assistant', '');
+      nb.innerHTML = '<span style="color:var(--warning);">⚠️ 追问会话不可用（页面已刷新或会话已过期），请重新发起分析后再追问。</span>';
+      return;
+    }
     chatBusy = true;
     inp.value = '';
     chatAppend('user', q);

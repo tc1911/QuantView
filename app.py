@@ -1206,6 +1206,46 @@ def _call_node_sheet(url, prompt, max_tokens=_SHEET_MAX_TOKENS, timeout=_NODE_TI
     return result
 
 
+# 工作表别名：用户问题中点名这些词时，只分析对应表（未点名则全部分析）
+_SHEET_ALIASES = {
+    "资产负债、杜邦分析": ["资产负债", "杜邦", "资产", "负债", "权益", "资本结构"],
+    "销售及毛利": ["销售及毛利", "销售毛利", "毛利", "销售"],
+    "应收账龄": ["应收账龄", "应收", "账龄", "应收款"],
+    "采购": ["采购", "物料"],
+    "存货": ["存货", "库存"],
+    "生产成本": ["生产成本", "产量", "单位成本"],
+    "期间费用": ["期间费用", "销售费用", "管理费用", "研发费用", "财务费用", "期间费用率"],
+    "人力成本": ["人力成本", "人力", "人工成本", "人工", "薪酬", "工资"],
+    "经营预算": ["经营预算", "预算", "目标"],
+    "税收": ["税收", "税"],
+    "资金状况": ["资金状况", "资金", "现金流", "现金流量"],
+    "物流运输": ["物流运输", "物流", "运输"],
+    "固定资产投资": ["固定资产投资", "固定资产", "固投"],
+}
+
+
+def _filter_tasks_by_question(tasks, question):
+    """用户问题明确点名工作表时只分析对应表；未点名时全部分析（安全默认）。
+
+    匹配方式：工作表名或其别名出现在问题中即命中；"成本/费用/资产"等别名
+    可能误命中，但只有问题确实点名了表才启用过滤，未命中任何表则保持全部分析。
+    """
+    matched = set()
+    for t in tasks:
+        label = t.get("label", "")
+        sname = label.split("·", 1)[1] if "·" in label else label
+        aliases = _SHEET_ALIASES.get(sname, [sname])
+        if any(a and a in question for a in aliases):
+            matched.add(sname)
+    if not matched:
+        return tasks
+    kept = [t for t in tasks
+            if (t["label"].split("·", 1)[1] if "·" in t["label"] else t["label"]) in matched]
+    if kept:
+        print(f"[工作表过滤] 问题点名了 {len(kept)} 张表: {sorted(matched)}，只分析这些表")
+    return kept or tasks
+
+
 def _prepare_distributed_input(valid_files, question):
     """为分布式模式准备任务列表：按工作表拆分 summary 与硬数字。
 
@@ -1267,6 +1307,11 @@ def _prepare_distributed_input_impl(valid_files, question):
             label = filename
             tasks.append({"label": label, "prompt": _build_sheet_prompt(label, summary, "", question)})
 
+    if not tasks:
+        raise RuntimeError("未检测到可分发的工作表数据")
+
+    # 问题点名工作表时只分析被点名的表
+    tasks = _filter_tasks_by_question(tasks, question)
     if not tasks:
         raise RuntimeError("未检测到可分发的工作表数据")
 
