@@ -1198,7 +1198,14 @@ console.log('[QuantView] JS loaded');
     // 追问模式：报告已完成且会话有效时，主输入框直接发追问
     if (submitBtn.dataset.followup === '1' && chatSessionId && currentSession) {
       var q2 = questionInput.value.trim();
-      if (!q2) { showError('请输入追问内容'); return; }
+      if (!q2) {
+        // 输入为空 → 视为"打开追问面板"（面板可能被 × 收起过），聚焦聊天输入框
+        var cp0 = document.getElementById('chatPanel');
+        if (cp0) cp0.classList.add('active');
+        var ci0 = document.getElementById('chatInput');
+        if (ci0) setTimeout(function () { ci0.focus(); }, 100);
+        return;
+      }
       questionInput.value = '';
       diagLog('点击追问按钮 → chatSend: ' + q2);
       chatSend(q2);
