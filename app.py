@@ -1229,6 +1229,9 @@ def _build_sheet_prompt(label, summary, hard, question):
         "29. 禁止出现硬数字中不存在的科目名及数值。编造科目黑名单（一律禁止出现）：人工费用、办公费、招待费、差旅费、"
         "认证费、检验费、检测费、运输费用；历史期数值（如2025H2=700）只有硬数字中存在才能引用，禁止凭空补历史值；"
         "禁止把其他工作表的数值（如职工教育经费700、区域运费200）挪作本表科目或本表历史期。找不到出处的科目直接不写。",
+        "30. 所有需要计算的地方（加总、占比、比率、变动率）一律输出 {{calc: 表达式}} 标记，服务端自动计算并替换为结果——"
+        "禁止自己心算数字。表达式只写数字和 + - * / 括号小数点；百分数用 *100（如 {{calc: 149800/420000*100}}% 显示为 43.6%）；"
+        "占比必须注明分母（如 {{calc: 8500/19500*100}}%）；标记必须完整闭合（{{calc: ...}}），表达式内禁止出现文字。",
     ]
     return "\n".join(parts)
 
@@ -1269,6 +1272,8 @@ def _build_overview_prompt(question, sections):
         "```",
         "7. 总览中的占比/进度/增幅必须用引用的数值现场重算并注明算式（如 103700/119700=86.6%），"
         "禁止凭感觉写'约一半'等无法由引用数字推导的表述；比率类数值转百分比必须乘 100（0.120=12%）。",
+        "8. 总览中的所有计算（占比/进度/增幅/比率）同样使用 {{calc: 表达式}} 标记，服务端自动计算替换，"
+        "禁止自己心算（如 {{calc: 103700/119700*100}}%）。",
     ]
     return "\n".join(parts)
 
@@ -1418,6 +1423,74 @@ def _prepare_distributed_input_impl(valid_files, question):
     }
 
 
+def _safe_eval_arith(expr):
+    """安全计算四则运算表达式（仅数字、+ - * / %、括号、小数点）。
+
+    用 ast 校验节点类型后再求值，杜绝 eval 任意代码（防 prompt 注入）。
+    % 视为除以100（如 8500/19500% = 0.0044...）。
+    """
+    import ast as _ast
+    expr = str(expr).replace("%", "/100")
+    tree = _ast.parse(expr, mode="eval")
+    allowed = (_ast.Expression, _ast.BinOp, _ast.UnaryOp, _ast.Constant,
+               _ast.Add, _ast.Sub, _ast.Mult, _ast.Div, _ast.USub, _ast.UAdd)
+    for node in _ast.walk(tree):
+        if not isinstance(node, allowed):
+            raise ValueError(f"不支持的表达式: {expr}")
+        if isinstance(node, _ast.Constant) and not isinstance(node.value, (int, float)):
+            raise ValueError(f"非数值: {expr}")
+    return eval(compile(tree, "<calc>", "eval"), {"__builtins__": {}})
+
+
+def _eval_calc_markers(text):
+    """把文本中所有 {{calc: 表达式}} 标记替换为计算结果。"""
+    def _repl(m):
+        try:
+            val = _safe_eval_arith(m.group(1))
+        except Exception:
+            return m.group(0)  # 计算失败保留原文（正常不应发生）
+        if isinstance(val, float):
+            s = f"{val:.2f}".rstrip("0").rstrip(".")
+            return "0" if s == "-0" else s
+        return str(int(val))
+    return re.sub(r"\{\{calc:\s*([^}]+?)\s*\}\}", _repl, text)
+
+
+class _CalcStreamer:
+    """流式替换 {{calc: ...}} 标记，支持标记跨文本块拆分。
+
+    feed(text) 返回可输出的部分（不完整标记尾部暂存）；流结束时 flush() 返回剩余尾部。
+    """
+
+    def __init__(self):
+        self._buf = ""
+
+    def feed(self, text):
+        out = self._buf + text
+        self._buf = ""
+        while True:
+            m = re.search(r"\{\{calc:\s*([^}]+?)\s*\}\}", out)
+            if not m:
+                break
+            out = out[:m.start()] + _eval_calc_markers(m.group(0)) + out[m.end():]
+        # 尾部可能是未闭合标记的开头（含被截断的前缀 "{{ca" 或完整开头 "{{calc: 8500"）：暂存等待下个块补全
+        # 注意要匹配 "{{" 整体（rfind("{") 会命中第二个 { 导致 tail 从 "{calc..." 开始）
+        idx = out.rfind("{{")
+        if idx == -1:
+            idx = out.rfind("{")
+        if idx != -1:
+            tail = out[idx:]
+            if tail.startswith("{{calc:") or "{{calc:".startswith(tail):
+                self._buf = tail
+                out = out[:idx]
+        return out
+
+    def flush(self):
+        out = self._buf
+        self._buf = ""
+        return _eval_calc_markers(out)
+
+
 def _stream_section_worker(q, node, t, stop_event):
     """流式工作表任务线程：把文本块逐个放入队列。
 
@@ -1507,6 +1580,8 @@ def _distributed_analysis_events(prep, question, output_parts, stop_event=None):
     failures = 0
     done = 0
     total = len(tasks)
+    # {{calc: 表达式}} 标记 → 服务端计算结果（流式逐块替换，支持跨块拆分）
+    calc_streamer = _CalcStreamer()
     # 每个任务独立的队列 + 任务顺序消费
     task_queues = {id(t): queue.Queue() for t in tasks}
 
@@ -1541,6 +1616,7 @@ def _distributed_analysis_events(prep, question, output_parts, stop_event=None):
                 if evt == "think":
                     yield ("think", chunk)
                 else:
+                    chunk = calc_streamer.feed(chunk)
                     output_parts.append(chunk)
                     parts.append(chunk)
                     yield ("text", chunk)
@@ -1565,8 +1641,15 @@ def _distributed_analysis_events(prep, question, output_parts, stop_event=None):
         if evt == "think":
             yield ("think", chunk)
         else:
+            chunk = calc_streamer.feed(chunk)
             output_parts.append(chunk)
             yield ("text", chunk)
+
+    # 冲刷尾部暂存（未闭合标记的兜底替换）
+    tail = calc_streamer.flush()
+    if tail:
+        output_parts.append(tail)
+        yield ("text", tail)
 
     if failures:
         note = f"\n\n⚠️ 共有 {failures} 个工作表任务失败，详细原因见对应小节。\n"
@@ -1608,7 +1691,7 @@ def _perform_analysis_distributed(prep, question):
     body_parts.append(f"## 总览与综合结论（主节点生成）\n\n{overview.strip()}\n")
     if failures:
         body_parts.append(f"⚠️ 共有 {failures} 个工作表任务失败，详细原因见对应小节。\n")
-    full = "\n".join(body_parts)
+    full = _eval_calc_markers("\n".join(body_parts))
 
     all_charts = _generate_charts_from_json(full)
     if not all_charts:
@@ -1977,6 +2060,7 @@ def analyze_stream():
                     yield f"data: {json.dumps({'type': 'text', 'content': chunk}, ensure_ascii=False)}\n\n"
 
             full_output = "".join(model_output_parts)
+            full_output = _eval_calc_markers(full_output)  # 兜底清理残留 calc 标记
             if not full_output or not full_output.strip():
                 full_output = "（模型未生成有效回复，请重试）"
 
