@@ -560,11 +560,17 @@ def _generate_charts_from_json(model_output):
         return charts
 
     for match in matches:
+        raw = match.group(1)
         try:
-            chart_specs = json.loads(match.group(1))
+            chart_specs = json.loads(raw)
         except json.JSONDecodeError:
-            print("[图表] chartjson 解析失败，跳过该块")
-            continue
+            # 尝试修复常见错误（对象/数组末尾多余逗号）后重试
+            fixed = _re.sub(r',\s*([\]}])', r'\1', raw)
+            try:
+                chart_specs = json.loads(fixed)
+            except json.JSONDecodeError:
+                print(f"[图表] chartjson 解析失败，跳过该块: {raw[:120]}")
+                continue
 
         if not isinstance(chart_specs, list):
             continue
@@ -614,6 +620,13 @@ def _render_chart_spec(spec, charts, fp_m, fp_sm):
         fig, ax = plt.subplots(figsize=(9, 4.5))
 
         if ctype == "pie":
+            # 饼图不支持负值：过滤非正值（如利息收入 -24、投资净流量 -21400）
+            keep = [(l, v) for l, v in zip(labels, values) if v > 0]
+            if not keep:
+                print(f"[图表] 跳过 {title}: 饼图无正值数据")
+                return
+            labels = [k for k, _ in keep]
+            values = [v for _, v in keep]
             colors = plt.cm.Set3(range(len(labels)))
             wedges, texts, autotexts = ax.pie(
                 values, labels=labels, autopct='%1.1f%%',
