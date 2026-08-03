@@ -601,6 +601,7 @@ def analyze():
     # 4. 执行分析
     try:
         output = perform_analysis(fresh_files, question)
+        _SESSIONS[session_id]["report"] = output["result"]
         return jsonify({
             "result": output["result"],
             "images": output.get("images", []),
@@ -1980,14 +1981,18 @@ def _new_followup_session(file_buffers):
 
 
 def _build_followup_prompt(sess):
-    """追问 prompt：数据背景 + 对话历史 + 最新问题。"""
+    """追问 prompt：数据背景 + 之前的报告 + 对话历史 + 最新问题。"""
     parts = [
-        "你是一位资深的企业经营数据分析师。请基于下面的数据背景和对话历史，回答用户的最新问题。",
+        "你是一位资深的企业经营数据分析师。请基于下面的数据背景和之前的分析报告，回答用户的最新问题。",
         "规则：引用具体数值（以硬数字为准），禁止编造；无数据支撑的明确说明；"
+        "用户指出你之前回答有误或不到位时，先认错纠正，再重新核对数据作答；"
         "回答用 Markdown，简洁直接，不超过 800 字。",
         "",
         "=== 数据背景 ===",
         sess["context"] or "（无数据背景）",
+        "",
+        "=== 之前的分析报告（供引用与修正） ===",
+        (sess.get("report") or "（无）")[:8000],
         "",
         "=== 对话历史 ===",
     ]
@@ -2135,6 +2140,9 @@ def analyze_stream():
             full_output = "".join(model_output_parts)
             if not full_output or not full_output.strip():
                 full_output = "（模型未生成有效回复，请重试）"
+
+            # 报告存入追问会话，供"接着问/修正"时引用
+            _SESSIONS[session_id]["report"] = full_output
 
             # 推送报告尾
             footer = "\n\n" + "-" * 40 + "\n报告生成完毕\n" + "-" * 40
