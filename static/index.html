@@ -1177,8 +1177,6 @@ console.log('[QuantView] JS loaded');
       if (!q2) { showError('请输入追问内容'); return; }
       questionInput.value = '';
       chatSend(q2);
-      var cpv = document.getElementById('chatPanel');
-      if (cpv) cpv.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
       return;
     }
     if (selectedFiles.length === 0) {
@@ -1928,6 +1926,9 @@ console.log('[QuantView] JS loaded');
       return;
     }
     chatBusy = true;
+    // 确保追问面板可见并滚动到输入框（导入会话/回车发送等路径可能未在视口内）
+    var cpn = document.getElementById('chatPanel');
+    if (cpn) { cpn.classList.add('active'); cpn.scrollIntoView({ behavior: 'smooth', block: 'nearest' }); }
     if (optQ === undefined) inp.value = '';
     chatAppend('user', q);
     if (currentSession) { currentSession.chat = currentSession.chat || []; currentSession.chat.push({ role: 'user', text: q }); }
@@ -1966,7 +1967,11 @@ console.log('[QuantView] JS loaded');
       var buffer = '';
       function read() {
         return reader.read().then(function (res) {
-          if (res.done) { renderBubble(); chatBusy = false; recordAssistant(); return; }
+          if (res.done) {
+            if (!full) { full = '（无回复：模型未返回内容，请重试）'; }
+            renderBubble(); chatBusy = false; recordAssistant();
+            return;
+          }
           buffer += decoder.decode(res.value, { stream: true });
           var lines = buffer.split('\n');
           buffer = lines.pop();
@@ -2094,11 +2099,21 @@ console.log('[QuantView] JS loaded');
       });
       cp2.classList.add('active');
       setSubmitMode(true);
+      // 追问面板在右栏底部，报告较长时看不到——直接滚动到面板并聚焦输入框
+      if (ct2 && !ct2.children.length) {
+        var hint = document.createElement('div');
+        hint.className = 'chat-msg assistant';
+        hint.innerHTML = '<span style="color:var(--text-muted);">该会话暂无追问记录，可直接在下方输入问题继续追问。</span>';
+        ct2.appendChild(hint);
+      }
+      var ci = document.getElementById('chatInput');
+      cp2.scrollIntoView({ behavior: 'smooth', block: 'end' });
+      if (ci) setTimeout(function () { ci.focus(); }, 400);
     } else if (cp2) {
       cp2.classList.remove('active');
       setSubmitMode(false);
+      resultSection.scrollIntoView({ behavior: 'smooth', block: 'start' });
     }
-    resultSection.scrollIntoView({ behavior: 'smooth', block: 'start' });
   }
 
   // ── Download as .md ──
