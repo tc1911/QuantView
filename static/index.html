@@ -1975,7 +1975,11 @@ console.log('[QuantView] JS loaded');
     var lastRender = 0;
 
     function renderBubble() {
-      if (bubble.parentNode) bubble.innerHTML = renderMarkdown(full);
+      if (bubble.parentNode) {
+        bubble.innerHTML = full
+          ? renderMarkdown(full)
+          : '<span style="color:var(--text-muted);">正在回答…</span>';
+      }
       var t = document.getElementById('chatThread');
       if (t) t.scrollTop = t.scrollHeight;
     }
