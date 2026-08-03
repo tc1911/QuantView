@@ -1847,17 +1847,16 @@ console.log('[QuantView] JS loaded');
   function renderMetaBadge(meta) {
     var el = document.getElementById('analysisMeta');
     if (!el) return;
-    if (meta.mode === 'distributed') {
-      el.innerHTML =
-        '<span class="meta-pill meta-distributed">分布式模式</span>' +
-        '<span class="meta-nodes">' + escHtml((meta.nodes || []).join('、')) + '</span>' +
-        '<span class="meta-progress" id="metaProgress">分项分析 0/0</span>' +
-        '<div class="meta-progress-wrap"><div class="meta-progress-bar" id="metaProgressBar"></div></div>';
-    } else {
-      el.innerHTML =
-        '<span class="meta-pill meta-single">单节点模式</span>' +
-        '<div class="meta-progress-wrap"><div class="meta-progress-bar indeterminate" id="metaProgressBar"></div></div>';
-    }
+    // 单节点/分布式都逐表处理，统一显示确定进度（分项分析 N/M + 填充条）
+    var pill = meta.mode === 'distributed'
+      ? '<span class="meta-pill meta-distributed">分布式模式</span>'
+      : '<span class="meta-pill meta-single">单节点模式</span>';
+    var nodes = meta.mode === 'distributed'
+      ? '<span class="meta-nodes">' + escHtml((meta.nodes || []).join('、')) + '</span>'
+      : '';
+    el.innerHTML = pill + nodes +
+      '<span class="meta-progress" id="metaProgress">分项分析 0/0</span>' +
+      '<div class="meta-progress-wrap"><div class="meta-progress-bar" id="metaProgressBar"></div></div>';
     el.classList.add('active');
   }
 
