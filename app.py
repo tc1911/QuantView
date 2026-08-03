@@ -1613,7 +1613,16 @@ def _distributed_analysis_events(prep, question, output_parts, stop_event=None):
         node = None
         parts = []
         while True:
-            kind, t2, node2, arg = q.get()
+            # 超时保护：worker 异常死亡导致队列永久静默时，把该任务标记失败继续投递，
+            # 避免主生成器无限阻塞（客户端永远等不到 done）
+            try:
+                kind, t2, node2, arg = q.get(timeout=900)
+            except queue.Empty:
+                failures += 1
+                block = f"\n\n### 工作表「{t['label']}」分析（节点：未知）\n\n⚠️ 该任务超时未返回（worker 异常），已跳过\n"
+                output_parts.append(block)
+                yield ("text", block)
+                break
             if node is None:
                 node = node2
             if kind == "chunk":
