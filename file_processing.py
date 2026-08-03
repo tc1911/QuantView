@@ -435,6 +435,9 @@ def extract_hard_numbers_core(stream):
                                "主要材料费", "材料费", "投资合计",
                                "*****中心建设项目", "项目合计", "总计",
                                "资金收益率", "理财产品", "政府补助专项资金"}
+                # 通用标签：跨板块重复出现、需要带板块前缀区分的指标名
+                _generic = {"合计", "总计", "氟化学", "锂电", "原材料", "库存商品",
+                            "半成品", "产成品", "发出商品及其他", "其他"}
                 for _ri in range(min(len(sdf), 80)):
                     row = sdf.iloc[_ri]
                     label = ""
@@ -446,13 +449,16 @@ def extract_hard_numbers_core(stream):
                     if not label:
                         continue
                     # 跳过非数据标签（记录为段落标题）；"单位："开头的是纯单位注释行
-                    #（如"单位：万元/天/吨"），不是指标，禁止提取成硬数字
+                    #（如"单位：万元/天/吨"），不是指标，禁止提取成硬数字，也不更新段落上下文
                     if label in _skip_labels or label.startswith("单位："):
-                        section_context = label
-                        last_section = label
+                        if not label.startswith("单位："):
+                            section_context = label
+                            last_section = label
                         continue
-                    # 去重：合计/总计用上下文区分，其余按标签去重
-                    dedup_key = f"{last_section}·{label}" if label in ("合计", "总计") else label
+                    # 去重：通用标签（氟化学/原材料等）按"段落·标签"去重，同名指标出现在
+                    # 不同板块时全部保留（如 氟化学库存·原材料 与 锂电库存·原材料）；
+                    # 其余标签按裸标签去重（跨板块重复的多为同一数据，保留一份即可）
+                    dedup_key = f"{last_section}·{label}" if label in _generic else label
                     if dedup_key in seen:
                         last_section = label
                         continue
@@ -491,11 +497,20 @@ def extract_hard_numbers_core(stream):
                         # 无数值的标签行视为段落标题（如"净利润变动""销售类型"），
                         # 同时更新 section_context——否则上下文会卡在上一个跳过标记
                         # （如"单位：万元"），导致后续所有合计行共用错误前缀、无法区分
-                        section_context = label
-                        last_section = label
+                        # 长文本/提示语（备注、警示）不作为段落上下文，防止污染前缀
+                        if len(label) <= 12 and not any(ch in label for ch in "⚠，。！？："):
+                            section_context = label
+                            last_section = label
                         continue
                     seen.add(dedup_key)
-                    ctx = f"{section_context}·" if (label in ("合计", "总计") and section_context and section_context not in ("合计", "总计")) else ""
+                    # 通用标签带板块前缀（如 销售额变动·氟化学），避免同名指标歧义；
+                    # 资金状况等表的板块行（期初/投资活动等）不是指标名，只对通用标签生效，
+                    # 其余标签保持裸标签，防止"期初·经营活动"这类污染
+                    ctx = ""
+                    if (label in _generic and section_context
+                            and section_context != label
+                            and section_context not in ("合计", "总计")):
+                        ctx = f"{section_context}·"
                     display_label = label
                     if label == "资金余额":
                         display_label = "期末资金余额"
@@ -516,11 +531,11 @@ def extract_hard_numbers_core(stream):
                     else:
                         for vp in val_pairs[:4]:
                             lines.append(f"  {full_label}({vp})")
-                # 合计行优先保留，其余按序截断（每 sheet 最多 20 行）
-                if len(lines) > 25:
+                # 合计行优先保留，其余按序截断（每 sheet 最多 40 行；板块明细行对分析价值高，放宽上限）
+                if len(lines) > 40:
                     priority = [l for l in lines if "合计" in l or "总计" in l or "收益率" in l or "周转率" in l or "乘数" in l or "净利率" in l or "费用率" in l]
                     other = [l for l in lines if l not in priority]
-                    lines = priority + other[:(25 - len(priority))]
+                    lines = priority + other[:(40 - len(priority))]
                 if len(lines) > 1:
                     hdr = f"【{sname}】"
                     # 资金状况：强调期末值
