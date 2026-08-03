@@ -1358,14 +1358,10 @@ console.log('[QuantView] JS loaded');
               currentMeta = data;
               chatSessionId = data.session || null;
               renderMetaBadge(data);
-              if (data.mode === 'distributed') {
-                midReset('等待任务分发…');
-                // 分布式：右栏不流式，完成时整体显示
-                var so = document.getElementById('streamOutput');
-                if (so) so.innerHTML = '<div style="color:var(--text-muted);padding:20px;text-align:center;">分项分析进行中…完成后在此显示完整报告</div>';
-              } else {
-                midReset('单节点模式：无分节点工作内容');
-              }
+              // 一律逐表处理（split=true）：中栏实时显示各表卡片，右栏完成时整体显示
+              midReset('等待任务分发…');
+              var so = document.getElementById('streamOutput');
+              if (so) so.innerHTML = '<div style="color:var(--text-muted);padding:20px;text-align:center;">分项分析进行中…完成后在此显示完整报告</div>';
             } else if (data.type === 'progress') {
               lastProgress = data;
               updateMetaProgress(data);
@@ -1382,7 +1378,7 @@ console.log('[QuantView] JS loaded');
 
               // 中栏：节点工作内容（必须用原始内容检测——思考禁用时
               // 正文会被下方 inThink 缓冲区吞掉，导致中栏收不到小节）
-              if (currentMeta && currentMeta.mode === 'distributed') {
+              if (currentMeta && currentMeta.split) {
                 var mSec = chunk.match(/^### 工作表「(.+?)」分析（节点：(.+?)）$/m);
                 var mOv = chunk.match(/^## 总览与综合结论/m);
                 if (mSec) {
@@ -1457,7 +1453,7 @@ console.log('[QuantView] JS loaded');
                   }, 2000);
                 }
                 // 单节点：流式渲染（150ms 节流）；分布式：右栏只累计，完成时整体显示
-                if (!(currentMeta && currentMeta.mode === 'distributed') && !window._renderTimer) {
+                if (!(currentMeta && currentMeta.split) && !window._renderTimer) {
                   window._renderTimer = setTimeout(function () {
                     window._renderTimer = null;
                     var so = document.getElementById('streamOutput');
@@ -1472,7 +1468,7 @@ console.log('[QuantView] JS loaded');
               }
 
               var status;
-              if (currentMeta && currentMeta.mode === 'distributed') {
+              if (currentMeta && currentMeta.split) {
                 status = lastProgress ? ('分项分析中…（' + lastProgress.done + '/' + lastProgress.total + '）') : '分项分析中…';
               } else {
                 status = inThink ? ('思考中… (' + thinkText.length + ' 字)') : ('正在分析… (' + fullText.length + ' 字)');
@@ -2078,7 +2074,7 @@ console.log('[QuantView] JS loaded');
         item.appendChild(h); item.appendChild(ie); chartsContainer.appendChild(item);
       });
       // 中栏回放：分布式会话重建各节点卡片
-      if (s.meta && s.meta.mode === 'distributed') {
+      if (s.meta && s.meta.split) {
         midRebuildFromText(s.outputText);
       } else {
         midReset('单节点模式：无分节点工作内容');

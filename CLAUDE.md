@@ -32,7 +32,6 @@ Useful deps: `flask pandas matplotlib numpy` (required); `openpyxl` (required �
 | `LLAMA_SERVER_PATH` | Path to llama-server binary. Default auto-search: `<项目目录>/llama-server/llama-server` (or `.exe`), project root, PATH. The binary is placed manually in the `llama-server/` folder (Windows: llama-server.exe, macOS/Linux: llama-server, macOS Metal build recommended) |
 | `DEEPANALYZE_NODES` | `name=url,name=url` 加速节点列表 — 设置了即为**主节点（分布式）模式**，工作表任务轮流分发，主节点只生成总览；不设置则为单节点模式 |
 | `DEEPANALYZE_NODE_TIMEOUT` | 单次节点调用超时秒数（默认 600） |
-| `DEEPANALYZE_HARD_NUMS_LIMIT` | 硬数字进入 prompt 的最大字符数（默认 12000；覆盖全表约需 8500，设小了资金状况/经营预算等表会被截断） |
 | `DEEPANALYZE_PORT` | 服务端口（默认 5000；同机跑主/加速双实例时用 `start_node.bat` 的 5001） |
 | `DEEPANALYZE_TEMPERATURE` | 采样温度（默认 0.5；报告为确定性任务，低温度降低单次跑飞/对话式输出概率） |
 | `DEEPANALYZE_HEADLESS` | `1/true` → 无头加速节点模式：不提供 Web 界面（`GET /` 返回 404 提示），仅保留 `/analyze/sheet` 任务接口，控制台逐任务打印收到/完成/耗时 |
@@ -58,16 +57,17 @@ All file parsing lives in **`file_processing.py`** (no Flask dependency; pure pa
 1. `read_file` — Excel: all sheets merged into one DataFrame with a `_sheet` column; PDF: pdfplumber tables merged with `_pdf_page`/`_pdf_table` columns; CSV: plain read.
 2. `df_summary` — builds a text summary: column dtype/null/uniqueness overview, per-sheet head/tail samples, text-column value distributions with row ranges, per-sheet numeric stats, missing values. This summary (not raw data) is what the model sees.
 3. `extract_hard_numbers_core` (also in `file_processing.py`) — finance-specific: re-reads Excel bytes to extract 合计/总计-style rows as "hard numbers" with normalized period labels (`2026H1`, `2026Q3`, 期末/年初 etc., see `_norm_period`). Line format is `指标名(期别=数值)` — the closing paren and the "负号只在数值本身、括号内是期别" warning in the prompt are deliberate anti-misreading protections; keep them when editing prompt logic. When present, the prompt marks hard numbers as authoritative ("禁止修改，必须原样引用") and **omits raw head/tail samples** so the model can't invent figures. This is an anti-hallucination mechanism — preserve it when editing prompt logic.
-4. `_prepare_analysis_input_impl` (in `app.py`) — assembles the giant Chinese system prompt: hard numbers first, then per-file summaries, then the user question, then a strict analysis protocol (per-section deep-dive, requirement checklist table, "no vague numbers" rules) and a requirement for a `chartjson` block at the end. File buffers are re-read from saved bytes because `FileStorage` streams are single-use.
+4. `_prepare_distributed_input_impl` (in `app.py`) — splits every file into **per-sheet tasks** (CSV/PDF = whole file); this is the ONLY analysis path now (single-node = the master's own model processes sheets one by one). The old single giant-prompt path was removed.
 
-### Distributed multi-node mode (master + accelerator nodes)
+### Per-sheet pipeline (single-node and distributed)
 
-Enabled by `DEEPANALYZE_NODES`; unset → classic single-node behavior. Flow (streaming and non-streaming paths both support it):
+All analysis goes through the same per-sheet pipeline; `DEEPANALYZE_NODES` adds accelerator nodes. Flow (streaming and non-streaming paths both support it):
 
 1. `_prepare_distributed_input_impl` — per-sheet split: each sheet of each Excel file becomes one task (CSV/PDF = whole file, one task). Per-sheet summary from `df_summary` on the filtered DataFrame; per-sheet hard numbers from `extract_hard_numbers_by_sheet` (parses `extract_hard_numbers_core` output by `【工作表名】` headers).
 2. `_build_sheet_prompt` / `_build_overview_prompt` — compact prompts preserving the anti-hallucination rules (hard numbers must be quoted verbatim, no fabricated periods, `chartjson` required at the end).
 3. `_distributed_analysis_events` (SSE) / `_perform_analysis_distributed` (non-streaming) — round-robin across **all nodes including the master itself** (`_work_nodes`/`_submit_node_task`). The streaming path is **parallel-generation, ordered-delivery**: each task runs in a `threading.Thread` (`_stream_section_worker`) that pumps text chunks into a **per-task `queue.Queue`** — local tasks iterate `_run_inference(stream=True)`, accelerator nodes read `/analyze/sheet/stream` SSE — and the master generator consumes task queues **in task order**, so each section's chunks stream contiguously (tables never get split by other sections' chunks) while all nodes still generate in parallel. The first chunk of each section carries the `### 工作表「x」分析（节点：y）` heading. Failed nodes degrade to a ⚠️ failure section instead of aborting the report.
 4. After all sections: the master's own model runs the overview prompt (`_run_inference`), producing 总览/综合结论. The final report = per-sheet sections + overview, and all `chartjson` blocks from all parts are rendered (multiple blocks supported via `finditer`).
+5. Without `DEEPANALYZE_NODES`, `_work_nodes()` is just the master itself — sheets are processed one by one by the local model, with the same per-sheet quality benefits (short focused prompts instead of one giant prompt).
 
 Each node is just another `app.py` instance — it needs its own model (or `DEEPANALYZE_DEBUG` + API key) and exposes `/analyze/sheet` automatically. Workers must NOT set `DEEPANALYZE_NODES` (avoid recursive distribution).
 
@@ -102,5 +102,5 @@ Standalone CLI: `python export_docx.py input.html output.docx [--title X]`; conv
 - Comments, prompts, and UI strings are all in Chinese — keep new prompts/reports in Chinese.
 - torch/transformers/pdfplumber/llama-cpp are optional and must stay lazily imported (module import must not fail without them).
 - `DEBUG_MODE` (not Flask's `debug`) gates model loading; Flask's own `debug=False` in `__main__`.
-- The giant prompt in `_prepare_analysis_input_impl` is the core product logic — model behavior is shaped almost entirely there, not in code.
+- Model behavior is shaped by the per-sheet prompts (`_build_sheet_prompt`) and the overview prompt (`_build_overview_prompt`) — the 铁律 (iron rules) in these prompts are the core product logic.
 - Upload limit is 200MB (`MAX_CONTENT_LENGTH`); allowed extensions are xlsx/xls/csv/pdf.

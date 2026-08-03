@@ -67,9 +67,6 @@ _LOCAL_SERVER_BODY = {
     "repeat_penalty": 1.15,
     "repeat_last_n": 512,
 }
-# 硬数字进入 prompt 的最大字符数（默认 12000，覆盖全部 11 张表约需 8500）
-# 太小会导致资金状况/经营预算等表被截断，模型误判"无数据"
-_HARD_NUMS_LIMIT = int(os.environ.get("DEEPANALYZE_HARD_NUMS_LIMIT", "12000"))
 # 采样温度（默认 0.5：报告是确定性任务，低温度降低单次跑飞/对话式输出概率）
 _TEMPERATURE = float(os.environ.get("DEEPANALYZE_TEMPERATURE", "0.5"))
 # 无头模式（加速节点专用）：不提供 Web 界面，只保留 /analyze/sheet 任务接口与命令行日志
@@ -975,283 +972,6 @@ def _run_inference(prompt, max_tokens=16384, stream=False):
     return _call_deepseek_api(prompt, max_tokens=65536, extra_body=_LOCAL_SERVER_BODY)
 
 
-def _prepare_analysis_input(valid_files, question):
-    """准备分析所需的 prompt 和数据框（供 /analyze 和 /analyze/stream 共用）。"""
-    import traceback
-    try:
-        return _prepare_analysis_input_impl(valid_files, question)
-    except Exception:
-        print(f"[_prepare ERROR] {traceback.format_exc()}")
-        raise
-
-def _prepare_analysis_input_impl(valid_files, question):
-    total_rows = 0
-    total_cols = 0
-    filenames = []
-    summaries = []
-    dataframes = []
-
-    # 先保存文件原始数据（FileStorage 流只能读一次）
-    from werkzeug.datastructures import FileStorage as _FS
-    file_buffers = []
-    fresh_files = []
-    for f in valid_files:
-        buf = io.BytesIO()
-        f.save(buf)
-        data = buf.getvalue()
-        file_buffers.append((f.filename, data))
-        fresh_files.append(_FS(stream=io.BytesIO(data), filename=f.filename))
-
-    for f in fresh_files:
-        try:
-            filename, suffix, df = read_file(f)
-        except Exception as e:
-            raise RuntimeError(f"文件 {f.filename} 读取失败: {str(e)}")
-
-        filenames.append(filename)
-        dataframes.append((filename, df))
-
-        try:
-            summary = df_summary(filename, df)
-        except Exception as e:
-            raise RuntimeError(f"数据摘要生成失败: {str(e)}")
-        summaries.append(summary)
-
-        total_rows += summary["num_rows"]
-        total_cols += summary["num_cols"]
-
-    # ── 硬数字速查：用保存的原始字节重新读取（FileStorage 已被消耗）──
-    hard_nums_str = ""
-    try:
-        hard_nums = extract_hard_numbers_from_bytes(file_buffers)
-        if hard_nums:
-            hard_nums_str = "\n".join(hard_nums)
-            if len(hard_nums_str) > _HARD_NUMS_LIMIT:
-                hard_nums_str = hard_nums_str[:_HARD_NUMS_LIMIT].rsplit("\n", 1)[0] + "\n（已截断）"
-    except Exception:
-        pass
-
-    # 构造提示词（硬数字放最前面）
-    prompt_parts = [
-        "你是一位资深的企业经营数据分析师。下面是一个经营数据文件的完整数据摘要，"
-        "请对用户提出的问题进行深入、全面的分析。",
-        "",
-        "⚠️ 以下【硬数字】为从 Excel 中精确提取的数值，绝对正确，禁止修改，必须原样引用。",
-        "每个数字都标注了期别标签（如 2026上半年=7400），使用前请核对期别。",
-        "",
-    ]
-    if hard_nums_str:
-        prompt_parts.append("=== ❌硬数字-禁止编造-必须引用 ===\n"
-                           "⚠️ 以下数值从Excel精确提取，绝对正确，必须原样引用，禁止修改。\n"
-                           "⚠️ 每个标签标注了期别（如2026H1=当前报告期），请使用对应[当前报告期]的值。\n"
-                           "⚠️ 硬数字行的格式为「指标名(期别=数值)」，如「应收票据(期末=13600)」表示期末应收票据为13600万元。\n"
-                           "⚠️ 负号只可能出现在数值本身（如-100表示负值），括号内是期别标签，不是负数；"
-                           "同一指标通常有'期初'和'期末'两行，必须成对核对后再解读增减方向。\n"
-                           "⚠️ 如同时出现'期初'和'期末'，请使用期末值（期末=当前报告期末的余额）。\n"
-                           "⚠️ 引用硬数字必须保留原始指标名（如净利率），禁止改写成硬数字中未出现的指标名（如毛利率）。\n"
-                           "⚠️ 只有当期数据（无历史期标签）的指标严禁编造对比期或变动率，只能陈述当期数值。\n"
-                           "⚠️ 报告中出现的任何数值必须能在硬数字中找到完全匹配的行（指标名+期别一致）；"
-                           "找不到出处的数值禁止填入，一律留空或写'无数据'；禁止挪用其他指标行的数值充当历史期。\n"
-                           "⚠️ 对比表的'期初/年初'值必须使用同一指标紧随'期末'的那期（标签为'年初'或'2025H2'），"
-                           "禁止混用'2025H1'等更早期别的数值。\n"
-                           "⚠️ '基准/冲刺'是两档目标值，不是时间序列，禁止当作期初/期末计算变动率；"
-                           "预算执行应对比实际值与预算目标（如实际销售额 vs 预算基准）。\n"
-                           + hard_nums_str + "\n=== 结束 ===")
-        prompt_parts.append("")
-    prompt_parts.append(f"共 {len(valid_files)} 个文件，总计 {total_rows} 行数据。")
-    prompt_parts.append("")
-
-    for i, s in enumerate(summaries, 1):
-        prompt_parts.append(f"=== 文件 {i}: {s['filename']} ===")
-        prompt_parts.append(f"数据规模: {s['num_rows']} 行 × {s['num_cols']} 列")
-        if s.get("sheet_overview"):
-            prompt_parts.append(s["sheet_overview"])
-        prompt_parts.append("")
-
-        # 有硬数字时只传 sheet_overview，其余全跳过，防模型读 raw data 编造
-        if not hard_nums_str:
-            if s.get("per_sheet_summary"):
-                prompt_parts.append("--- 预计算汇总 ---")
-                prompt_parts.append(s['per_sheet_summary'])
-                prompt_parts.append("")
-            prompt_parts.append("--- 头部数据 ---")
-            prompt_parts.append(s['head_str'])
-            prompt_parts.append("")
-            prompt_parts.append("--- 尾部数据 ---")
-            prompt_parts.append(s['tail_str'])
-            prompt_parts.append("")
-            prompt_parts.append("--- 文本列值分布 ---")
-            prompt_parts.append(s['dimensions_str'])
-            prompt_parts.append("")
-            prompt_parts.append("--- 缺失值 ---")
-            prompt_parts.append(s['missing_str'])
-            prompt_parts.append("")
-
-    # 铁律放在用户问题正前方，服从度最高（放在长文末尾会被忽略）
-    prompt_parts.append("""【铁律 - 违反任何一条视为分析失败】
-1. 数据概览表必须列出核心指标（至少 3 行、至多 8 行，每行含指标名+数值），不得省略为空。
-2. 变化分析/业务解读/策略建议/风险提示每节各写 1-3 段，禁止每个指标单独一段的模板化、逐项式输出。
-3. 整份报告（不含图表数据区块）控制在 6000 字以内。
-4. 每个数值必须有硬数字出处（指标名+期别完全匹配），无出处的写"无数据"。
-5. 硬数字中不存在的期别或指标不得出现。
-6. 只有当期数据的表，历史期列必须写"无数据"，禁止把当期值复制到历史期列、禁止从其他指标行取值。
-7. 图表数据不得用 0、重复值或其他指标行的数值填充缺失期别。
-8. 禁止连续重复输出相同或雷同的内容（如同一指标行重复列出多次）。
-9. 变化分析的对比期必须与上方对比表一致（以"2025H2/年初"列为基准），禁止改用"2025H1"等其他列计算变动率。
-10. 历史期为"无数据"的指标只陈述当期数值，禁止写出任何增幅/降幅。
-11. "预算金额/合同金额/已付金额"是项目执行阶段而非时间序列，禁止计算降幅，应解读为执行进度。
-12. 必须分析数据中的每一个工作表，每个工作表一个板块，禁止省略任何一张；确实无法分析的表也要写一小节说明原因。
-13. 每个板块只输出 1 个【图表数据】区块，禁止重复或近似重复的图表。
-14. 本任务是单轮一次性任务，必须在一次输出中生成完整报告；禁止向用户提问、禁止"是否继续"式交互、禁止中途停止等待确认。
-15. 禁止使用 LaTeX 公式、$...$、引用块（> 符号）等格式，一律使用纯 Markdown 表格与文本。
-16. 禁止用省略号（...）、"依此类推"、"其余板块"等占位内容敷衍；每个板块必须完整写出数据概览、关键对比、变化分析、业务解读、策略建议、风险提示六个小节。
-17. 板块清单中的行号范围必须来自数据摘要中的真实行号，无法确定时写"—"，禁止编造行号区间。
-18. 直接输出报告正文，以『板块名称：』开头；禁止任何前言、思考过程、计划或解释性开头（如"好的""首先""我需要""让我们"等），第一个字必须是正文。
-19. 经营预算板块只包含预算科目（预算销售额、预算净利润、工资、年终奖金、社保、公积金、福利费、工会经费等），禁止出现应收票据、应付账款、经营现金流、固定资产、流动负债等资产负债表科目。
-20. 硬数字中真实存在的期别数值（如2025H2）必须被引用使用，禁止把存在的数据标为"无数据"；同一节内数据概览表与关键指标对比表必须一致，禁止自相矛盾。
-21. 同一小节的多个子节必须覆盖不同内容，禁止两个子节使用相同表格、相同数值或相同结论；内容雷同的子节必须合并为一个；每个小节最多 4 个子节，超过即失败。
-22. 所有合计、占比、比率必须用报告中引用的数值现场重新计算并注明算式（如"8500+3400+1100+300+6800=20100"、"3800/8500=44.7%"），禁止给出无法由引用数字推导的结果。
-""")
-    prompt_parts.append("")
-    prompt_parts.append(f"=== 用户问题 ===\n{question}")
-    prompt_parts.append("")
-    prompt_parts.append("""=== 需求对照检查（强制执行） ===
-
-在开始分析报告之前，你务必先做以下自查，并在报告末尾列出对照结果：
-
-1. 从用户问题中逐条提取所有分析要求（如：氟化学品市场销售影响、资产规模变化、投融资情况、现金流、成本费用、预算执行、盈利质量、风险识别、发展目标与解决方案等）。
-2. 对每条要求，确认：数据中是否有直接数据支撑？如果没有直接数据，应从哪些相关指标推断？
-3. 报告输出时，每一条用户要求都必须有对应的分析段落，不允许遗漏。即使数据不完全，也要明确说明"当前数据在XX方面存在局限，基于可用的XX指标进行推断"。
-4. 报告末尾附一个对照表：| 用户要求 | 对应报告章节 | 数据支撑情况 |
-
-常见的容易遗漏维度警告（必须覆盖，每个都要独立成板块）：
-
-1. 成本费用分析（强制执行）—— 即便是推断也必须独立成章：
-   - 从净利率变动反推成本结构变化（净利率下降说明成本/费用增速>收入增速）
-   - 从应付账款激增推断采购成本与账期策略
-   - 从存货变动推断生产成本走势
-   - 从货币资金/利息收支推断财务费用
-   - 明确标注"数据局限：无直接利润表明细，基于XX指标推算"但不能因此跳过
-2. 预算执行（如有预算vs实际数据）
-3. 现金流分析（经营活动/投资/筹资现金流，或从应收应付存货变动推断）
-4. 投融资活动（借款变化、权益变动、资本开支）
-
-=== 分析协议（必须严格遵守） ===
-
-你的分析方式：不是把整份数据混在一起笼统地讲，而是【逐节拆分、逐节深挖】。
-把数据当成一本经营报告书，每个业务板块是独立的一章，每一章都要独立、完整、深入地分析。
-
-═══════════════════════════════════════
-第一步：拆分数据，划定分析单元
-═══════════════════════════════════════
-
-扫描全部数据，识别数据中自然存在的【独立业务板块/独立表格】。一个板块的特征：
-- 由空行/标题行/汇总行分隔
-- 列名发生变化
-- 主题切换（如从"资产"切换到"收入"）
-- 数据结构发生变化（如从明细表切换到汇总表）
-
-列出所有识别到的板块，给出每个板块的名称和范围（行号），【不允许合并不同板块】。
-
-数据来自 Excel 的多个工作表（见上述工作表概览）。分析时必须以【工作表】为基本单元，
-逐表分析。每个工作表都是独立的数据板块，不允许合并或遗漏。
-
-提示：如果数据包含"生产成本""期间费用""经营预算""资金状况""销售及毛利"等表，
-这些表里的数据就是成本费用和现金流的直接数据，必须完整引用，不允许说"无直接数据"。
-
-示例输出格式：
-| 序号 | 板块名称 | 行号范围 | 主要内容 |
-|------|----------|----------|----------|
-| 1    | 资产结构 | 第1-30行 | 货币资金、结构性存款…… |
-| 2    | 成本费用分析 | （推断板块） | 从净利率+应付+存货反推成本结构…… |
-| 3    | 销售收入 | 第32-80行 | 各产品线收入明细…… |
-（有多少板块就列多少，不遗漏任何一个）
-
-═══════════════════════════════════════
-第二步：逐板块独立分析（每个板块一个 ## 大标题）
-═══════════════════════════════════════
-
-对第一步列出的【每一个板块】，独立输出一节完整分析，不允许合并、不允许一笔带过。
-每个板块的分析必须是一个完整、自足的段落，包含以下全部内容：
-
-【板块内必须包含】
-1. 数据概览表：该板块涉及哪些指标、多少行、数据完整度
-2. 关键指标对比表：期末vs期初/预算vs实际/各分类明细，用表格展示
-3. 变化分析：各指标变动率、绝对值变化，标注异常波动（变动 >30% 的标红预警）
-4. 业务解读（强制执行）：
-   - 这个板块的数据变化反映了什么经营状况？
-   - 数据之间的关系说明了什么？（如：费用增长快于收入增长→盈利能力承压）
-   - 对整体经营的传导影响是什么？
-5. 策略建议（强制执行）：
-   - 针对这个板块，具体应该采取什么管理动作？
-   - 是否需要调整预算、优化流程、加强管控？
-6. 风险提示：该板块存在的数据质量问题（缺失、异常值）和经营风险
-
-═══════════════════════════════════════
-第三步：跨板块综合分析
-═══════════════════════════════════════
-
-在所有板块独立分析完成后，串起来看全局：
-
-- 板块之间的联动关系：A板块的变化如何影响B板块？
-  （如：销售收入增长但应收账款也在增长→可能存在回款周期拉长风险）
-- 整体经营画像：这家企业的优势在哪个板块？短板在哪里？
-- 资源错配检测：是否有板块投入大产出小？是否有高价值板块投入不足？
-- 前瞻预测：基于各板块趋势，预测下阶段的整体经营走势
-
-═══════════════════════════════════════
-第四步：总评与行动纲领
-═══════════════════════════════════════
-
-- 经营健康度评分（优秀/良好/关注/预警）
-- TOP 3 亮点 和 TOP 3 风险
-- 5 项最紧迫工作（按优先级排序，每项标明负责板块）
-
-═══════════════════════════════════════
-输出格式要求
-═══════════════════════════════════════
-
-- 报告标题：## 板块名称
-- 数据：表格呈现，**重点数字加粗**
-- 每条发现必须有 >2 个具体数值引用
-- 不允许出现"某些指标""部分数据"等模糊表述—必须说出具体列名和数值
-- 如果数据只有一期，表格只列一期，严禁编造多期对比（编造比缺失更严重）
-- 无历史期数据的指标不得计算变动率，只能陈述当期数值
-- 表格中的每个数值必须有硬数字出处（指标名+期别完全匹配），找不到出处的留空写"无数据"，禁止挪用其他指标行的数值充当历史期
-- 对比表中"期初/年初"值必须来自同一指标标签为"年初"或"2025H2"的行，禁止使用"2025H1"等其他期别的数值
-- "基准/冲刺"是两档目标值而非时间序列，禁止计算变动率；预算执行应对比实际值与预算目标
-- 图表数据必须与正文一致：只有当期数据的指标只列当期数值，禁止用 0 或占位值填充缺失期别
-- 引用硬数字必须保留原始指标名（如净利率），禁止改写成硬数字中未出现的指标名（如毛利率）
-- 数据概览表只列核心指标（最多 8 行），禁止逐行或逐行号区间罗列，数据量大时用"共N行"概括
-- 整份报告（不含图表数据区块）控制在 6000 字以内，禁止枚举式、重复式输出
-- 禁止将同一组数字复制粘贴到多个期别列中
-- 每个板块的分析必须独立完整，读者可以只看一个板块而不需要参考其他部分
-- 报告末尾必须附上【需求对照表】，格式：| 用户要求 | 对应章节 | 数据支撑情况 |
-
-- 在需求对照表之后，输出一个【图表数据】区块。每个分析模块至少生成一张图表，展示该模块的关键对比数据。数据必须来自上方的硬数字，禁止编造。以 JSON 格式列出：
-```chartjson
-[
-  {"title": "图表标题", "type": "bar/pie/line/bar_h", "data": {"指标1": 数值, "指标2": 数值}}
-]
-```""")
-
-    prompt = "\n".join(prompt_parts)
-
-    return {
-        "filenames": filenames,
-        "total_rows": total_rows,
-        "total_cols": total_cols,
-        "dataframes": dataframes,
-        "prompt": prompt,
-    }
-
-
-# ══════════════════════════════════════════════════════════════
-# 多节点分布式分析
-# 主节点（设置了 DEEPANALYZE_NODES）把各工作表任务轮流分发给加速节点，
-# 各节点的 AI 分别完成分项分析，最后由主节点的 AI 生成总览，拼成完整报告。
-# ══════════════════════════════════════════════════════════════
-
 def _distributed_nodes():
     """解析 DEEPANALYZE_NODES，返回 [{"name", "url"}]；未设置返回 []（单节点模式）。"""
     nodes = []
@@ -1268,15 +988,12 @@ def _distributed_nodes():
 
 
 def _work_nodes():
-    """参与工作表分发的节点：主节点自身（url=None，本地推理）+ 加速节点列表。
-
-    避免主节点模型闲置——工作表任务在全部节点间轮流分配。
-    """
+    """参与工作表分发的节点：主节点自身（url=None，本地推理）+ 加速节点列表。"""
     return [{"name": "主节点", "url": None}] + _distributed_nodes()
 
 
 def _submit_node_task(ex, node, prompt):
-    """按节点类型提交任务：主节点本地推理，加速节点走 HTTP。"""
+    """按节点类型提交任务：主节点本地推理，加速节点走 HTTP（非流式路径用）。"""
     if node["url"] is None:
         return ex.submit(_run_inference, prompt, _SHEET_MAX_TOKENS)
     return ex.submit(_call_node_sheet, node["url"], prompt)
@@ -1721,8 +1438,8 @@ def _perform_analysis_distributed(prep, question):
     return {
         "result": "\n".join(report_lines),
         "images": all_charts,
-        "mode": "distributed",
-        "nodes": [n["name"] for n in nodes],
+        "mode": "distributed" if _distributed_nodes() else "single",
+        "nodes": [n["name"] for n in _distributed_nodes()],
     }
 
 
@@ -1934,13 +1651,10 @@ def analyze_stream():
         fresh_files.append(_FS(stream=io.BytesIO(data), filename=f.filename))
     valid_files = fresh_files
 
-    # 3. 准备分析输入（分布式模式按工作表拆分任务）
+    # 3. 准备分析输入（一律按工作表拆分任务；无加速节点时主节点自己逐表处理）
     distributed = bool(_distributed_nodes())
     try:
-        if distributed:
-            prep = _prepare_distributed_input(valid_files, question)
-        else:
-            prep = _prepare_analysis_input(valid_files, question)
+        prep = _prepare_distributed_input(valid_files, question)
     except Exception as e:
         return jsonify({"error": f"数据准备失败: {str(e)}"}), 500
 
@@ -1951,8 +1665,10 @@ def analyze_stream():
         model_output_parts = []
         try:
             # 推送模式标识（单节点/分布式）+ 追问会话 id，供前端展示徽标
+            # split=true：一律按工作表逐表处理（单节点=主节点自己逐表）
             meta = {"type": "meta", "mode": "distributed" if distributed else "single",
                     "nodes": [n["name"] for n in _distributed_nodes()],
+                    "split": True,
                     "session": session_id}
             yield f"data: {json.dumps(meta, ensure_ascii=False)}\n\n"
 
@@ -1973,22 +1689,14 @@ def analyze_stream():
             ])
             yield f"data: {json.dumps({'type': 'text', 'content': header}, ensure_ascii=False)}\n\n"
 
-            # 流式推理（分布式：并行分发工作表任务 + 主节点总览）
-            if distributed:
-                for evt_type, chunk in _distributed_analysis_events(prep, question, model_output_parts):
-                    if evt_type == "think":
-                        yield f"data: {json.dumps({'type': 'think', 'content': chunk}, ensure_ascii=False)}\n\n"
-                    elif evt_type == "progress":
-                        yield f"data: {json.dumps({'type': 'progress', 'done': chunk['done'], 'total': chunk['total']}, ensure_ascii=False)}\n\n"
-                    else:
-                        yield f"data: {json.dumps({'type': 'text', 'content': chunk}, ensure_ascii=False)}\n\n"
-            else:
-                for evt_type, chunk in _run_inference(prep["prompt"], stream=True):
-                    if evt_type == "think":
-                        yield f"data: {json.dumps({'type': 'think', 'content': chunk}, ensure_ascii=False)}\n\n"
-                    else:
-                        model_output_parts.append(chunk)
-                        yield f"data: {json.dumps({'type': 'text', 'content': chunk}, ensure_ascii=False)}\n\n"
+            # 流式推理：逐表处理（有加速节点时并行分发 + 保序投递；单节点时主节点自己逐表）
+            for evt_type, chunk in _distributed_analysis_events(prep, question, model_output_parts):
+                if evt_type == "think":
+                    yield f"data: {json.dumps({'type': 'think', 'content': chunk}, ensure_ascii=False)}\n\n"
+                elif evt_type == "progress":
+                    yield f"data: {json.dumps({'type': 'progress', 'done': chunk['done'], 'total': chunk['total']}, ensure_ascii=False)}\n\n"
+                else:
+                    yield f"data: {json.dumps({'type': 'text', 'content': chunk}, ensure_ascii=False)}\n\n"
 
             full_output = "".join(model_output_parts)
             if not full_output or not full_output.strip():
@@ -2033,60 +1741,13 @@ def analyze_stream():
 
 
 def perform_analysis(files, question):
-    """执行数据分析 —— 读取多个文件 + 调用模型/API 生成综合报告 + 图表。
+    """执行数据分析 —— 按工作表逐表处理（无加速节点时主节点自己处理）+ 总览 + 图表。
 
     Returns:
-        {"result": 文本报告, "images": [(标题, base64), ...]}
+        {"result": 文本报告, "images": [(标题, base64), ...], "mode", "nodes"}
     """
-    # 分布式模式：按工作表分发到加速节点，主节点生成总览
-    if _distributed_nodes():
-        prep = _prepare_distributed_input(files, question)
-        return _perform_analysis_distributed(prep, question)
-
-    prep = _prepare_analysis_input(files, question)
-    prompt = prep["prompt"]
-
-    # ── 调用模型推理 ──
-    model_output = _run_inference(prompt)
-
-    # ── 生成图表：优先 AI 指定，回退自动 ──
-    all_charts = _generate_charts_from_json(model_output)
-    if not all_charts:
-        for fname, df in prep["dataframes"]:
-            prefix = fname if len(prep["dataframes"]) > 1 else ""
-            try:
-                charts = _generate_charts(df, prefix=prefix)
-                all_charts.extend(charts)
-            except Exception as e:
-                print(f"[图表] {fname} 图表生成失败: {e}")
-
-    # ── 拼装最终报告 ──
-    report_lines = [
-        "=" * 60,
-        "QuantView 数据分析报告",
-        "=" * 60,
-        "",
-        f"分析文件 ({len(files)} 个): {', '.join(prep['filenames'])}",
-        f"分析问题: {question}",
-        f"数据总量: {prep['total_rows']} 行 × {prep['total_cols']} 列",
-        "",
-        "-" * 40,
-        "AI 分析正文",
-        "-" * 40,
-        "",
-        model_output.strip(),
-        "",
-        "-" * 40,
-        "报告生成完毕",
-        "-" * 40,
-    ]
-
-    return {
-        "result": "\n".join(report_lines),
-        "images": all_charts,
-        "mode": "single",
-        "nodes": [],
-    }
+    prep = _prepare_distributed_input(files, question)
+    return _perform_analysis_distributed(prep, question)
 
 
 @app.route("/export/docx", methods=["POST"])
