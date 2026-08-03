@@ -752,6 +752,28 @@
     padding: 2px 6px;
   }
   .chat-close-btn:hover { color: var(--text); }
+  /* 追问悬浮球：面板收起时出现在右下角，点击调出面板 */
+  .chat-ball {
+    position: fixed;
+    right: 24px;
+    bottom: 24px;
+    width: 54px;
+    height: 54px;
+    border-radius: 50%;
+    background: var(--primary);
+    color: #fff;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.3);
+    cursor: pointer;
+    z-index: 998;
+    transition: transform 0.15s;
+    border: none;
+    padding: 0;
+  }
+  .chat-ball.show { display: flex; }
+  .chat-ball:hover { transform: scale(1.08); }
   .chat-thread {
     padding: 12px;
     display: flex;
@@ -958,6 +980,11 @@
     </div>
   </div>
   </div><!-- /col-right -->
+
+  <!-- 追问悬浮球（面板收起时显示，点击调出面板） -->
+  <button class="chat-ball" id="chatBall" title="继续追问">
+    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/></svg>
+  </button>
 
 </div><!-- /main-grid -->
 </main>
@@ -1204,6 +1231,7 @@ console.log('[QuantView] JS loaded');
         if (cp0) cp0.classList.add('active');
         var ci0 = document.getElementById('chatInput');
         if (ci0) setTimeout(function () { ci0.focus(); }, 100);
+        syncChatBall();
         return;
       }
       questionInput.value = '';
@@ -1542,6 +1570,7 @@ console.log('[QuantView] JS loaded');
               } else {
                 setSubmitMode(false);
               }
+              syncChatBall();
               return;
             }
           });
@@ -1835,11 +1864,20 @@ console.log('[QuantView] JS loaded');
     window.scrollTo({ top: 0, behavior: 'smooth' });
   });
 
-  // ── 二次追问：发送按钮 + Enter + 收起 ──
+  // ── 二次追问：发送按钮 + Enter + 收起 + 悬浮球 ──
   document.getElementById('chatSendBtn').addEventListener('click', function () { chatSend(); });
   document.getElementById('chatCloseBtn').addEventListener('click', function () {
     var cp3 = document.getElementById('chatPanel');
     if (cp3) cp3.classList.remove('active');
+    syncChatBall();
+  });
+  document.getElementById('chatBall').addEventListener('click', function () {
+    if (!chatSessionId) { showError('暂无追问会话，请先完成一次分析'); return; }
+    var p4 = document.getElementById('chatPanel');
+    if (p4) p4.classList.add('active');
+    var i4 = document.getElementById('chatInput');
+    if (i4) setTimeout(function () { i4.focus(); }, 100);
+    syncChatBall();
   });
   document.getElementById('chatInput').addEventListener('keydown', function (e) {
     if (e.key !== 'Enter') return;
@@ -1949,6 +1987,15 @@ console.log('[QuantView] JS loaded');
     if (t) t.innerHTML = '';
     var inp = document.getElementById('chatInput');
     if (inp) inp.value = '';
+    syncChatBall();
+  }
+
+  // 悬浮球显隐：有会话且面板收起时显示，面板打开或会话失效时隐藏
+  function syncChatBall() {
+    var ball = document.getElementById('chatBall');
+    var panel = document.getElementById('chatPanel');
+    if (!ball || !panel) return;
+    ball.classList.toggle('show', !!chatSessionId && !panel.classList.contains('active'));
   }
 
   // 临时诊断条：固定在页面顶部，追加式记录（可滚动），任何情况下都能看到追问各步骤的执行情况
@@ -1986,6 +2033,7 @@ console.log('[QuantView] JS loaded');
     // 确保追问面板可见（悬浮窗固定在视口右下角，激活即显示）
     var cpn = document.getElementById('chatPanel');
     if (cpn) cpn.classList.add('active');
+    syncChatBall();
     if (optQ === undefined) inp.value = '';
     chatAppend('user', q);
     if (currentSession) { currentSession.chat = currentSession.chat || []; currentSession.chat.push({ role: 'user', text: q }); }
@@ -2190,6 +2238,7 @@ console.log('[QuantView] JS loaded');
       setSubmitMode(false);
       resultSection.scrollIntoView({ behavior: 'smooth', block: 'start' });
     }
+    syncChatBall();
   }
 
   // ── Download as .md ──
