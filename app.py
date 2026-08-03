@@ -1917,23 +1917,84 @@ def _new_followup_session(file_buffers):
     return session_id
 
 
+def _split_report_sections(report):
+    """把报告按章节标题切分为 [(标题 or None, 正文), ...]，None 表示报告头部（不参与修改）。"""
+    sections = []
+    cur_h = None
+    cur_body = []
+    for ln in (report or "").split("\n"):
+        if re.match(r"^#{2,3} ", ln):
+            sections.append((cur_h, "\n".join(cur_body)))
+            cur_h = ln
+            cur_body = []
+        else:
+            cur_body.append(ln)
+    sections.append((cur_h, "\n".join(cur_body)))
+    return sections
+
+
+def _apply_report_edit(report, reply):
+    """从追问回复中提取【报告修改】块并应用到报告对应章节。
+
+    Returns:
+        (新报告文本, 被修改章节标题 or None)
+    """
+    m = re.search(r"【报告修改】\s*\n*修改章节[:：]\s*([^\n]+?)\s*\n*新内容[:：]\s*\n?(.*)", reply, re.S)
+    if not m:
+        return report, None
+    target = re.sub(r"\s+", "", m.group(1))
+    new_body = m.group(2).strip()
+    if not target:
+        return report, None
+    sections = _split_report_sections(report)
+    hit = None
+    for i, (h, body) in enumerate(sections):
+        if not h:
+            continue
+        hn = re.sub(r"\s+", "", h)
+        if target in hn or hn in target:
+            sections[i] = (h, new_body)
+            hit = h.strip()
+            break
+    if hit is None:
+        return report, None
+    parts = []
+    for h, body in sections:
+        parts.append(f"{h}\n{body}" if h else body)
+    return "\n".join(parts), hit
+
+
 def _build_followup_prompt(sess):
     """追问 prompt：数据背景 + 之前的报告 + 对话历史 + 最新问题。"""
+    question = sess["turns"][-1][1]
+    # 编辑类问题需要完整报告才能准确改章节；普通问题只给开头摘要，控制预填充长度
+    edit_hints = ("修改", "调整", "补充", "加上", "加入", "删除", "去掉", "删掉", "更新", "重写", "替换", "换成", "改")
+    if any(k in question for k in edit_hints):
+        report_part = sess.get("report") or "（无）"
+    else:
+        report_part = (sess.get("report") or "（无）")[:4000]
     parts = [
         "你是一位资深的企业经营数据分析师。这是一次【追问对话】：用户基于之前已完成的报告，"
-        "针对某个具体问题进行补充提问、质疑或要求解释。",
+        "针对某个具体问题进行补充提问、质疑、要求解释或要求修改报告。",
         "铁律：",
         "1. 只回答用户的最新问题，禁止重新逐表分析，禁止重复或改写之前的报告内容；",
         "2. 禁止输出报告结构：禁止'### 工作表'标题、禁止【图表数据】区块、禁止逐板块罗列表格；",
         "3. 引用具体数值时以硬数字为准，禁止编造；无数据支撑的明确说明；",
         "4. 用户指出之前回答有误或不到位时，先认错纠正，再核对数据作答；",
         "5. 回答用 Markdown，简洁直接，不超过 800 字。",
+        "6. 如果用户要求修改/更新报告内容（如'把结论改成…'、'在风险提示里补充…'、'删掉某段'），"
+        "先写一句话确认，然后在回答末尾输出一个【报告修改】块（不要省略任何字段）：",
+        "【报告修改】",
+        "修改章节: <要修改章节的标题，必须与报告中的章节标题一致，例如 ## 总览与综合结论（主节点生成）>",
+        "新内容:",
+        "<该章节的完整新正文，不含标题行。如果原章节末尾有```chartjson```代码块，必须原样保留在新内容末尾>",
+        "7. 用户没有要求修改报告时，禁止输出【报告修改】块，正常回答即可。",
         "",
         "=== 数据背景（仅供核对数值，不要重新展开分析） ===",
         sess["context"] or "（无数据背景）",
         "",
-        "=== 之前的分析报告（仅供引用与修正，不要重述） ===",
-        (sess.get("report") or "（无）")[:4000],
+        "=== 之前的分析报告（修改需求时给完整报告，否则仅供引用，不要重述） ===",
+        report_part,
         "",
         "=== 对话历史 ===",
     ]
@@ -1982,15 +2043,25 @@ def analyze_followup():
                 gen.close()
             except BaseException:
                 pass
+            if output:
+                reply_text = "".join(output)
+                # 应用【报告修改】块：更新会话报告、推送 report_edit 事件，回复文本剔除修改块
+                new_report, section_hit = _apply_report_edit(sess.get("report", ""), reply_text)
+                if section_hit:
+                    sess["report"] = new_report
+                    try:
+                        yield f"data: {json.dumps({'type': 'report_edit', 'new_report': new_report, 'section': section_hit}, ensure_ascii=False)}\n\n"
+                    except BaseException:
+                        pass  # 客户端断开（GeneratorExit）
+                    reply_text = re.sub(r"【报告修改】[\s\S]*$", "", reply_text).strip()
+                sess["turns"].append(("assistant", reply_text))
+                if len(sess["turns"]) > 12:
+                    sess["turns"] = sess["turns"][-12:]
+                _persist_session(session_id)
             try:
                 yield "data: {\"type\": \"done\"}\n\n"
             except BaseException:
                 pass  # 客户端断开（GeneratorExit）时优雅关闭
-            if output:
-                sess["turns"].append(("assistant", "".join(output)))
-                if len(sess["turns"]) > 12:
-                    sess["turns"] = sess["turns"][-12:]
-                _persist_session(session_id)
 
     return Response(
         stream_with_context(generate()),

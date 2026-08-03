@@ -2111,6 +2111,18 @@ console.log('[QuantView] JS loaded');
             var d; try { d = JSON.parse(line.substring(6)); } catch (e) { return; }
             if (d.type === 'text') { full += d.content; gotChunk = true; chunkCount++; if (chunkCount % 20 === 0) { diagLog('已收 ' + chunkCount + ' 块 full=' + full.length); } scheduleRender(); }
             else if (d.type === 'error') { full += '\n⚠️ ' + d.content; }
+            else if (d.type === 'report_edit') {
+              // 聊天中修改报告：重新渲染报告 + 更新会话文本 + 同步中栏卡片
+              if (currentSession) {
+                currentSession.outputText = d.new_report;
+                renderResult((currentSession.thinkText ? '<think>' + currentSession.thinkText + '</think>\n' : '') + d.new_report);
+                if (currentSession.meta && currentSession.meta.split) midRebuildFromText(d.new_report);
+              }
+              // 剔除气泡里的【报告修改】原始块，换成一行确认
+              full = full.replace(/【报告修改】[\s\S]*$/, '').trim();
+              full += '\n\n✅ 报告已更新章节：' + (d.section || '') + '（右栏报告已同步刷新）';
+              scheduleRender();
+            }
           });
           return read();
         });
