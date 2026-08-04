@@ -2124,6 +2124,19 @@ def analyze_followup():
 # 背景：超长 SSE 连接在部分浏览器/系统环境下 ~5 分钟静默断流（服务端写阻塞、worker 继续空算），
 # 轮询方式每次都是短连接，从根上规避该问题。
 _JOBS = {}
+# 拆批分析的分组状态：跨批次累积章节文本，最后一个批次生成总览/图表/邮件
+_ANALYSIS_GROUPS = {}
+
+
+def _extract_sections_from_text(text):
+    """从累积报告文本中提取各工作表章节 (label, node, body)，供总览 prompt 使用。"""
+    sections = []
+    parts = re.split(r"(?=^### 工作表「|^## 总览)", text, flags=re.M)
+    for p in parts:
+        m = re.match(r"^### 工作表「(.+?)」分析（节点：(.+?)）", p.strip())
+        if m:
+            sections.append((m.group(1), m.group(2), p[m.end():].strip()))
+    return sections
 
 
 def _job_watchdog(job_id, job, idle_limit=600):
@@ -2149,21 +2162,27 @@ def _job_watchdog(job_id, job, idle_limit=600):
             return
 
 
-def _job_worker(job_id, prep, question, session_id, distributed, stop_event):
+def _job_worker(job_id, prep, question, session_id, distributed, stop_event,
+                group="", batch=0, last_batch=True):
+    """批次任务线程。batch 0 输出报告头；最后一个批次汇总总览/图表/邮件/会话持久化。
+
+    拆批目的：单批运行时长远低于消费线程卡死窗口（~30-45 分钟），从根上规避停滞。
+    """
     job = _JOBS[job_id]
     model_output_parts = []
     try:
-        job["events"].append({"type": "meta", "mode": "distributed" if distributed else "single",
-                              "nodes": [n["name"] for n in _distributed_nodes()],
-                              "split": True, "session": session_id})
-        header = "\n".join([
-            "=" * 60, "QuantView 数据分析报告", "=" * 60, "",
-            f"分析文件 ({len(prep['filenames'])} 个): {', '.join(prep['filenames'])}",
-            f"分析问题: {question}",
-            f"数据总量: {prep['total_rows']} 行 × {prep['total_cols']} 列",
-            "", "-" * 40, "AI 分析正文", "-" * 40, "",
-        ])
-        job["events"].append({"type": "text", "content": header})
+        if batch == 0:
+            job["events"].append({"type": "meta", "mode": "distributed" if distributed else "single",
+                                  "nodes": [n["name"] for n in _distributed_nodes()],
+                                  "split": True, "session": session_id})
+            header = "\n".join([
+                "=" * 60, "QuantView 数据分析报告", "=" * 60, "",
+                f"分析文件 ({len(prep['filenames'])} 个): {', '.join(prep['filenames'])}",
+                f"分析问题: {question}",
+                f"数据总量: {prep['total_rows']} 行 × {prep['total_cols']} 列",
+                "", "-" * 40, "AI 分析正文", "-" * 40, "",
+            ])
+            job["events"].append({"type": "text", "content": header})
         for evt_type, chunk in _distributed_analysis_events(prep, question, model_output_parts, stop_event):
             if stop_event.is_set():
                 break
@@ -2174,29 +2193,54 @@ def _job_worker(job_id, prep, question, session_id, distributed, stop_event):
             else:
                 job["events"].append({"type": "text", "content": chunk})
         if not stop_event.is_set():
-            full_output = "".join(model_output_parts)
-            full_output = _eval_calc_markers(full_output)
-            if not full_output or not full_output.strip():
-                full_output = "（模型未生成有效回复，请重试）"
-            _SESSIONS[session_id]["report"] = full_output
-            _persist_session(session_id)
-            job["events"].append({"type": "text", "content": "\n\n" + "-" * 40 + "\n报告生成完毕\n" + "-" * 40})
-            all_charts = _generate_charts_from_json(full_output)
-            if not all_charts:
-                for fname, df in prep["dataframes"]:
-                    prefix = fname if len(prep["dataframes"]) > 1 else ""
+            g = _ANALYSIS_GROUPS.get(group) if group else None
+            if g:
+                g["text"] += "".join(model_output_parts)
+            if last_batch:
+                full_output = g["text"] if g else "".join(model_output_parts)
+                full_output = _eval_calc_markers(full_output)
+                if not full_output or not full_output.strip():
+                    full_output = "（模型未生成有效回复，请重试）"
+                _SESSIONS[session_id]["report"] = full_output
+                _persist_session(session_id)
+                # 总览：使用跨批次累积的完整报告文本
+                sections = _extract_sections_from_text(full_output)
+                job["events"].append({"type": "text",
+                                      "content": "\n\n---\n\n## 总览与综合结论（主节点生成）\n\n"})
+                ov_gen = _run_inference(_build_overview_prompt(question, sections),
+                                        max_tokens=16384, stream=True)
+                try:
+                    for evt, chunk in ov_gen:
+                        if stop_event.is_set():
+                            break
+                        if evt == "think":
+                            job["events"].append({"type": "think", "content": chunk})
+                        else:
+                            chunk2 = _eval_calc_markers(chunk)
+                            job["events"].append({"type": "text", "content": chunk2})
+                finally:
                     try:
-                        all_charts.extend(_generate_charts(df, prefix=prefix))
-                    except Exception as e:
-                        print(f"[图表] {fname} 图表生成失败: {e}")
-            if all_charts:
-                job["events"].append({"type": "charts", "images": all_charts})
-            try:
-                threading.Thread(target=_send_report_email,
-                                 args=(question, prep["filenames"], full_output, all_charts),
-                                 daemon=True).start()
-            except Exception:
-                pass
+                        ov_gen.close()
+                    except BaseException:
+                        pass
+                job["events"].append({"type": "text",
+                                      "content": "\n\n" + "-" * 40 + "\n报告生成完毕\n" + "-" * 40})
+                all_charts = _generate_charts_from_json(full_output)
+                if not all_charts:
+                    for fname, df in prep["dataframes"]:
+                        prefix = fname if len(prep["dataframes"]) > 1 else ""
+                        try:
+                            all_charts.extend(_generate_charts(df, prefix=prefix))
+                        except Exception as e:
+                            print(f"[图表] {fname} 图表生成失败: {e}")
+                if all_charts:
+                    job["events"].append({"type": "charts", "images": all_charts})
+                try:
+                    threading.Thread(target=_send_report_email,
+                                     args=(question, prep["filenames"], full_output, all_charts),
+                                     daemon=True).start()
+                except Exception:
+                    pass
     except Exception as e:
         import traceback
         print(f"[Job Error] {traceback.format_exc()}")
@@ -2244,7 +2288,37 @@ def analyze_start():
     except Exception as e:
         return jsonify({"error": f"数据准备失败: {str(e)}"}), 500
 
-    session_id = _new_followup_session(file_buffers)
+    # ── 拆批：13 张表拆成多个短任务，前端自动串行接力 ──
+    # 每批独立 job/线程，单批时长远低于消费线程卡死窗口（~30-45 分钟）
+    try:
+        batch = int(request.form.get("batch", 0) or 0)
+    except (TypeError, ValueError):
+        batch = 0
+    group = (request.form.get("group") or "").strip()
+    tasks_per_batch = max(1, int(os.environ.get("DEEPANALYZE_BATCH_TASKS", "3") or "3"))
+    total_tasks = len(prep["tasks"])
+    batches = max(1, (total_tasks + tasks_per_batch - 1) // tasks_per_batch)
+    if batch < 0 or batch >= batches:
+        batch = 0
+    a = batch * tasks_per_batch
+    b = min(total_tasks, a + tasks_per_batch)
+    last_batch = (b >= total_tasks)
+    prep = {**prep, "tasks": prep["tasks"][a:b]}
+
+    if not group:
+        group = os.urandom(8).hex()
+    g = _ANALYSIS_GROUPS.setdefault(group, {"sections": [], "text": "", "session_id": None,
+                                            "question": question, "filenames": prep["filenames"],
+                                            "created": time.time()})
+    if batch == 0:
+        session_id = _new_followup_session(file_buffers)
+        g["session_id"] = session_id
+    else:
+        session_id = g["session_id"] or _new_followup_session(file_buffers)
+    if len(_ANALYSIS_GROUPS) > 8:
+        for old in sorted(_ANALYSIS_GROUPS, key=lambda k: _ANALYSIS_GROUPS[k]["created"])[:len(_ANALYSIS_GROUPS) - 8]:
+            _ANALYSIS_GROUPS.pop(old, None)
+
     job_id = os.urandom(8).hex()
     stop_event = threading.Event()
     _JOBS[job_id] = {"events": [], "done": False, "error": None, "session": None,
@@ -2253,11 +2327,13 @@ def analyze_start():
     if len(_JOBS) > 8:
         for old in sorted(_JOBS, key=lambda k: _JOBS[k]["created"])[:len(_JOBS) - 8]:
             _JOBS.pop(old, None)
+    print(f"[分析] 批次 {batch + 1}/{batches}（任务 {a + 1}-{b}/{total_tasks}）group={group[:8]}")
     threading.Thread(target=_job_worker,
-                     args=(job_id, prep, question, session_id, distributed, stop_event),
+                     args=(job_id, prep, question, session_id, distributed, stop_event,
+                           group, batch, last_batch),
                      daemon=True).start()
     threading.Thread(target=_job_watchdog, args=(job_id, _JOBS[job_id]), daemon=True).start()
-    return jsonify({"job": job_id})
+    return jsonify({"job": job_id, "batches": batches, "group": group, "batch": batch})
 
 
 @app.route("/analyze/poll", methods=["GET"])

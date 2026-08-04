@@ -1543,98 +1543,116 @@ console.log('[QuantView] JS loaded');
       syncChatBall();
     }
 
-    // 启动后台任务，轮询取增量
-    fetch('/analyze/start', {
-      method: 'POST',
-      body: formData
-    }).then(function (r) {
-      return r.json().then(function (d) {
-        if (!r.ok) throw new Error(d.error || 'HTTP ' + r.status);
-        return d;
-      });
-    }).then(function (d) {
-      var jobId = d.job;
-      var fromIdx = 0;
-      var pollStopped = false;
-      diagLog('任务已启动 job=' + jobId);
-      var lastEventTime = Date.now();
-      // 空闲监测：预填充/思考阶段可能几十秒无事件，显示"已 N 秒无更新"避免误判断开
-      var idleTimer = setInterval(function () {
-        var idle = Date.now() - lastEventTime;
-        if (idle > 10000) {
-          var st = document.getElementById('streamStatus');
-          if (st) {
-            st.textContent = '模型预填充中…（已 ' + Math.round(idle / 1000) + ' 秒无更新，属正常现象）';
-            st.style.color = idle > 120000 ? 'var(--warning)' : '';
-          }
-        }
-        if (idle % 30000 < 5000) {
-          diagLog('空闲 ' + Math.round(idle / 1000) + 's：已收 ' + diagChunks + ' 块，fullText=' + fullText.length);
-        }
-      }, 5000);
+    // ── 拆批串行：多批短任务接力（每批独立 job，单批时长远低于卡死窗口） ──
+    var chainStopped = false;
+    var chainBatches = 1;
+    var chainGroup = '';
 
-      function poll() {
-        if (pollStopped) return;
-        fetch('/analyze/poll?job=' + encodeURIComponent(jobId) + '&from=' + fromIdx, { cache: 'no-store' })
-          .then(function (r) { return r.json(); })
-          .then(function (d) {
-            if (pollStopped) return;
-            if (d.error && !d.done) {
-              // 任务不存在/已过期等：报错停止，不无限重试
-              clearInterval(idleTimer);
-              loadingContainer.classList.remove('active');
-              submitBtn.disabled = false;
-              submitBtn.classList.remove('btn-stop');
-              submitBtn.innerHTML = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg> 开始分析';
-              showError('分析失败：' + d.error);
-              diagLog('任务失败: ' + d.error);
-              return;
+    function startBatch(batchIdx, group, batches) {
+      if (chainStopped) return;
+      chainBatches = batches || 1;
+      chainGroup = group || '';
+      var fd = new FormData();
+      selectedFiles.forEach(function (f) { fd.append('files', f); });
+      fd.append('question', question);
+      fd.append('batch', batchIdx);
+      fd.append('batches', chainBatches);
+      if (chainGroup) fd.append('group', chainGroup);
+      fetch('/analyze/start', { method: 'POST', body: fd }).then(function (r) {
+        return r.json().then(function (d) {
+          if (!r.ok) throw new Error(d.error || 'HTTP ' + r.status);
+          return d;
+        });
+      }).then(function (d) {
+        if (chainStopped) return;
+        var jobId = d.job;
+        var fromIdx = 0;
+        diagLog('批次 ' + (batchIdx + 1) + '/' + d.batches + ' 启动 job=' + jobId);
+        var lastEventTime = Date.now();
+        // 空闲监测：预填充/思考阶段可能几十秒无事件，显示"已 N 秒无更新"避免误判断开
+        var idleTimer = setInterval(function () {
+          var idle = Date.now() - lastEventTime;
+          if (idle > 10000) {
+            var st = document.getElementById('streamStatus');
+            if (st) {
+              st.textContent = '模型预填充中…（已 ' + Math.round(idle / 1000) + ' 秒无更新，属正常现象）';
+              st.style.color = idle > 120000 ? 'var(--warning)' : '';
             }
-            if (!d.events) { setTimeout(poll, 2000); return; }
-            d.events.forEach(function (ev) { lastEventTime = Date.now(); handleStreamEvent(ev); });
-            fromIdx = d.from;
-            if (d.done) {
-              clearInterval(idleTimer);
-              if (d.error) {
+          }
+          if (idle % 30000 < 5000) {
+            diagLog('空闲 ' + Math.round(idle / 1000) + 's：已收 ' + diagChunks + ' 块，fullText=' + fullText.length);
+          }
+        }, 5000);
+
+        function poll() {
+          if (chainStopped) return;
+          fetch('/analyze/poll?job=' + encodeURIComponent(jobId) + '&from=' + fromIdx, { cache: 'no-store' })
+            .then(function (r) { return r.json(); })
+            .then(function (d2) {
+              if (chainStopped) return;
+              if (d2.error && !d2.done) {
+                // 任务不存在/已过期等：报错停止，不无限重试
+                clearInterval(idleTimer);
                 loadingContainer.classList.remove('active');
                 submitBtn.disabled = false;
                 submitBtn.classList.remove('btn-stop');
                 submitBtn.innerHTML = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg> 开始分析';
-                showError('分析失败：' + d.error);
-                diagLog('任务失败: ' + d.error);
-              } else {
-                finalizeAnalysis();
+                showError('分析失败：' + d2.error);
+                diagLog('任务失败: ' + d2.error);
+                return;
               }
-              return;
-            }
-            setTimeout(poll, 2000);
-          })
-          .catch(function () {
-            // 单次轮询失败（网络抖动/服务重启）不中断，继续重试
-            setTimeout(poll, 3000);
-          });
-      }
-      poll();
-      // 停止按钮：取消后台任务（置位 stop_event，worker 提前终止释放模型）
-      currentAbortController = {
-        abort: function () {
-          pollStopped = true;
-          clearInterval(idleTimer);
-          try { fetch('/analyze/cancel', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ job: jobId }) }); } catch (e) {}
-          loadingContainer.classList.remove('active');
-          submitBtn.disabled = false;
-          submitBtn.classList.remove('btn-stop');
-          submitBtn.innerHTML = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg> 开始分析';
-          clearMetaBadge();
+              if (!d2.events) { setTimeout(poll, 2000); return; }
+              d2.events.forEach(function (ev) { lastEventTime = Date.now(); handleStreamEvent(ev); });
+              fromIdx = d2.from;
+              if (d2.done) {
+                clearInterval(idleTimer);
+                if (d2.error) {
+                  loadingContainer.classList.remove('active');
+                  submitBtn.disabled = false;
+                  submitBtn.classList.remove('btn-stop');
+                  submitBtn.innerHTML = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg> 开始分析';
+                  showError('分析失败：' + d2.error);
+                  diagLog('任务失败: ' + d2.error);
+                } else if (batchIdx + 1 < d.batches) {
+                  // 还有批次 → 自动启动下一批（同一 group 串行接力）
+                  diagLog('批次 ' + (batchIdx + 1) + '/' + d.batches + ' 完成，启动下一批');
+                  startBatch(batchIdx + 1, d.group, d.batches);
+                } else {
+                  finalizeAnalysis();
+                }
+                return;
+              }
+              setTimeout(poll, 2000);
+            })
+            .catch(function () {
+              // 单次轮询失败（网络抖动/服务重启）不中断，继续重试
+              setTimeout(poll, 3000);
+            });
         }
-      };
-    }).catch(function (err) {
-      loadingContainer.classList.remove('active');
-      submitBtn.disabled = false;
-      submitBtn.classList.remove('btn-stop');
-      submitBtn.innerHTML = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg> 开始分析';
-      showError('分析启动失败：' + (err.message || '网络错误'));
-    });
+        poll();
+        // 停止按钮：取消当前批次并停止后续批次（置位 stop_event，worker 提前终止释放模型）
+        currentAbortController = {
+          abort: function () {
+            chainStopped = true;
+            clearInterval(idleTimer);
+            try { fetch('/analyze/cancel', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ job: jobId }) }); } catch (e) {}
+            loadingContainer.classList.remove('active');
+            submitBtn.disabled = false;
+            submitBtn.classList.remove('btn-stop');
+            submitBtn.innerHTML = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg> 开始分析';
+            clearMetaBadge();
+          }
+        };
+      }).catch(function (err) {
+        if (chainStopped) return;
+        loadingContainer.classList.remove('active');
+        submitBtn.disabled = false;
+        submitBtn.classList.remove('btn-stop');
+        submitBtn.innerHTML = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg> 开始分析';
+        showError('分析启动失败：' + (err.message || '网络错误'));
+      });
+    }
+    startBatch(0, '', 0);
   });
 
   // Intercept submit button during streaming: stop
