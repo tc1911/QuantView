@@ -1185,7 +1185,9 @@ def _build_sheet_prompt(label, summary, hard, question):
         "分析思路必须贴合上方'用户问题'：问题明确指向的板块/指标深挖并优先呈现，与问题无关的指标只放数据表不展开讨论，"
         "小标题、结论与建议围绕问题展开，禁止输出与问题无关的模板化内容。",
         "2. 每个板块必须包含：数据概览表、关键指标对比表、变化分析（⚠️预警标记只用于变动幅度绝对值 >30% 的指标，"
-        "不足 30% 时严禁出现'预警'字样）、业务解读、策略建议、风险提示。"
+        "不足 30% 时严禁出现'预警'字样；⚠️ 符号本身也只能出现在变动绝对值 >30% 的指标上，"
+        "费用、成本、收入、利润的任何指标变动不足 30% 时一律不得加 ⚠️，写完必须自查全文，"
+        "发现 <30% 的指标带 ⚠️ 立即删除）、业务解读、策略建议、风险提示。"
         "骨架固定是质量底线，但各小节的内容侧重必须按用户问题调整：问题涉及的业务写深写透，"
         "问题未涉及的维度简写；如果问题指向单一指标（如只看应收账款），该指标的分析必须放在板块最前并给出明确结论。",
         "3. 每条发现必须引用至少 2 个具体数值（硬数字优先），禁止“某些指标”“部分数据”等模糊表述。",
@@ -1451,8 +1453,17 @@ def _safe_eval_arith(expr):
     return eval(compile(tree, "<calc>", "eval"), {"__builtins__": {}})
 
 
+def _normalize_calc_forms(text):
+    """把模型误用的其他 calc 标记格式归一化为 {{calc: 表达式}}：
+    {% calc %}表达式{% endcalc %} 与 {% calc: 表达式 %} 两种。
+    """
+    text = re.sub(r"\{%\s*calc\s*%\}\s*([\s\S]*?)\s*\{%\s*endcalc\s*%\}", lambda m: "{{calc: " + m.group(1).strip() + "}}", text)
+    text = re.sub(r"\{%\s*calc\s*[:：]\s*([^%}]+?)\s*%\}", lambda m: "{{calc: " + m.group(1).strip() + "}}", text)
+    return text
+
+
 def _eval_calc_markers(text):
-    """把文本中所有 {{calc: 表达式}} 标记替换为计算结果。"""
+    """把文本中所有 {{calc: 表达式}} 标记替换为计算结果（先归一化 {% calc %} 等变体）。"""
     def _repl(m):
         try:
             val = _safe_eval_arith(m.group(1))
@@ -1462,7 +1473,7 @@ def _eval_calc_markers(text):
             s = f"{val:.2f}".rstrip("0").rstrip(".")
             return "0" if s == "-0" else s
         return str(int(val))
-    return re.sub(r"\{\{calc:\s*([^}]+?)\s*\}\}", _repl, text)
+    return re.sub(r"\{\{calc:\s*([^}]+?)\s*\}\}", _repl, _normalize_calc_forms(text))
 
 
 class _CalcStreamer:
