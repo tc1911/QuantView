@@ -1668,7 +1668,7 @@ def _distributed_analysis_events(prep, question, output_parts, stop_event=None):
                     output_parts.append(chunk)
                     parts.append(chunk)
                     deliver_cnt += 1
-                    if deliver_cnt % 100 == 0:
+                    if deliver_cnt % 500 == 0:
                         print(f"[分布式] 已投递 {deliver_cnt} 块（{t['label'][:16]}）@ {time.strftime('%H:%M:%S')}")
                     yield ("text", chunk)
             elif kind == "error":
@@ -2583,5 +2583,12 @@ if __name__ == "__main__":
     print()
     print("按 Ctrl+C 停止服务")
     print("=" * 60)
-    # 端口可用 DEEPANALYZE_PORT 覆盖（多实例/分布式同机部署时需要）
-    app.run(host="0.0.0.0", port=_port, debug=False)
+    # 优先用 waitress（固定线程池，避免 werkzeug 每请求新建线程导致的长期运行线程风暴）；
+    # 未安装时回退 werkzeug 开发服务器
+    try:
+        from waitress import serve
+        print(f"[服务] 使用 waitress（固定线程池，适合长时间分析）")
+        serve(app, host="0.0.0.0", port=_port, threads=8)
+    except ImportError:
+        # 端口可用 DEEPANALYZE_PORT 覆盖（多实例/分布式同机部署时需要）
+        app.run(host="0.0.0.0", port=_port, debug=False)

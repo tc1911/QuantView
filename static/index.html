@@ -1601,7 +1601,7 @@ console.log('[QuantView] JS loaded');
                 diagLog('任务失败: ' + d2.error);
                 return;
               }
-              if (!d2.events) { setTimeout(poll, 2000); return; }
+              if (!d2.events) { setTimeout(poll, 3000); return; }
               d2.events.forEach(function (ev) { lastEventTime = Date.now(); handleStreamEvent(ev); });
               fromIdx = d2.from;
               if (d2.done) {
@@ -1622,7 +1622,7 @@ console.log('[QuantView] JS loaded');
                 }
                 return;
               }
-              setTimeout(poll, 2000);
+              setTimeout(poll, 3000);
             })
             .catch(function () {
               // 单次轮询失败（网络抖动/服务重启）不中断，继续重试
