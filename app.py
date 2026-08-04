@@ -72,6 +72,9 @@ _LOCAL_SERVER_BODY = {
 _TEMPERATURE = float(os.environ.get("DEEPANALYZE_TEMPERATURE", "0.5"))
 # 无头模式（加速节点专用）：不提供 Web 界面，只保留 /analyze/sheet 任务接口与命令行日志
 _HEADLESS = os.environ.get("DEEPANALYZE_HEADLESS", "").lower() in ("1", "true", "yes")
+# 启动时是否清理残留的 llama-server 僵尸进程（枚举+杀进程，可能被安全软件误判为恶意行为，
+# 默认关闭；确有僵尸占显存导致启动 OOM 时再设 DEEPANALYZE_KILL_STALE=1 开启）
+_KILL_STALE = os.environ.get("DEEPANALYZE_KILL_STALE", "").lower() in ("1", "true", "yes")
 
 if DEBUG_MODE:
     print("=" * 60)
@@ -350,8 +353,11 @@ def _kill_stale_llama_servers():
     Vulkan 显存不足（ErrorOutOfDeviceMemory）加载失败——日志里就出现过一次。只清理
     "父进程已不存在"的进程：同机跑主/加速双实例时各自 llama-server 的父进程都活着，
     不会被误杀。非 Windows 平台保守起见不处理。
+    默认关闭：PowerShell 枚举+杀进程的行为可能被安全软件（360/火绒类）误判，
+    实测出现过 python 主进程被外部杀掉的崩溃（无任何报错，轮询与流同时消失）。
+    确有僵尸占显存问题时设 DEEPANALYZE_KILL_STALE=1 开启。
     """
-    if os.name != "nt":
+    if os.name != "nt" or not _KILL_STALE:
         return
     try:
         import subprocess
@@ -2617,6 +2623,7 @@ if __name__ == "__main__":
     print("=" * 60)
     print("QuantView - 本地数据分析助手")
     print("=" * 60)
+    print("[版本] 自愈通道 v3（读超时240s · 断流自动重试 · 单槽推理 · 僵尸清理默认关）")
     print()
     _port = int(os.environ.get("DEEPANALYZE_PORT", "5000"))
     if _HEADLESS:
