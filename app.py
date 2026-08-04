@@ -53,6 +53,7 @@ DEEPSEEK_MODEL = "deepseek-reasoner" if DEEPSEEK_THINKING else "deepseek-chat"
 _NODE_LIST = os.environ.get("DEEPANALYZE_NODES", "").strip()
 _NODE_TIMEOUT = float(os.environ.get("DEEPANALYZE_NODE_TIMEOUT", "600"))
 _SHEET_MAX_TOKENS = 8192  # 每个工作表任务的最大输出 token 数
+_STREAM_READ_TIMEOUT = 240  # 流式响应体读超时（秒）：模型流卡死（连接挂着但不发数据）时 worker 尽快抛错，配合自愈重启
 # 本地 llama-server 调优参数（仅 GGUF 路径附加，DeepSeek API 不受影响）：
 # - chat_template_kwargs.enable_thinking=false：Qwen3 思考模式会泄漏思维链进正文
 # - repeat_penalty / repeat_last_n：长输出重复循环防护（默认 1.0=关闭，模型会退化复读）
@@ -339,6 +340,164 @@ def _select_model():
             exit(0)
 
 
+_llama_proc = None  # 本地 llama-server 子进程句柄（模块级：重启自愈用）
+
+
+def _kill_stale_llama_servers():
+    """清理残留的同模型 llama-server 僵尸进程（父进程已退出的）。
+
+    崩溃/强杀的应用会留下 llama-server 进程继续占着显存，导致下次启动或自愈重启时
+    Vulkan 显存不足（ErrorOutOfDeviceMemory）加载失败——日志里就出现过一次。只清理
+    "父进程已不存在"的进程：同机跑主/加速双实例时各自 llama-server 的父进程都活着，
+    不会被误杀。非 Windows 平台保守起见不处理。
+    """
+    if os.name != "nt":
+        return
+    try:
+        import subprocess
+        model_tag = os.path.basename(MODEL_PATH).replace("'", "''")
+        ps = (
+            "Get-CimInstance Win32_Process -Filter \"name='llama-server.exe'\" | "
+            "Where-Object { $_.CommandLine -like '*" + model_tag + "*' -and "
+            "-not (Get-Process -Id $_.ParentProcessId -ErrorAction SilentlyContinue) } | "
+            "ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue; "
+            "Write-Output $_.ProcessId }"
+        )
+        r = subprocess.run(["powershell", "-NoProfile", "-Command", ps],
+                           timeout=15, capture_output=True, text=True)
+        killed = r.stdout.strip()
+        if killed:
+            print(f"[自愈] 已清理残留 llama-server 僵尸进程（PID: {killed.splitlines()}）")
+    except Exception:
+        pass
+
+
+def _start_llama_server():
+    """启动外部 llama-server 并等待 /health 就绪；设置全局 API URL。
+
+    独立成函数，供启动与流卡死自愈重启（_restart_llama_server）共用。
+    """
+    global _llama_proc, _model, _tokenizer, DEEPSEEK_API_URL
+    import subprocess
+    import time
+
+    # 先清理残留僵尸进程（父进程已退出、占着显存的旧 llama-server），
+    # 否则重启/新启动可能因显存不足失败
+    _kill_stale_llama_servers()
+
+    # 查找 llama-server 二进制（优先项目目录 llama-server/ 文件夹）
+    server_bin = os.environ.get("LLAMA_SERVER_PATH", "")
+    if not server_bin:
+        _project_dir = os.path.dirname(os.path.abspath(__file__))
+        candidates = [
+            os.path.join(_project_dir, "llama-server", "llama-server.exe"),
+            os.path.join(_project_dir, "llama-server", "llama-server"),
+            os.path.join(_project_dir, "llama-server.exe"),
+            os.path.join(_project_dir, "llama-server"),
+            "llama-server", "llama-server.exe",
+            "C:/Users/tc191/llama-cpp/llama-server.exe",
+        ]
+        for c in candidates:
+            if os.path.isfile(c) or shutil.which(c):
+                server_bin = c
+                break
+
+    if not server_bin:
+        raise RuntimeError(
+            "未找到 llama-server 二进制。请把 llama.cpp 的 llama-server 放到项目目录的\n"
+            "llama-server/ 文件夹（即 <项目目录>/llama-server/llama-server），\n"
+            "或设置环境变量 LLAMA_SERVER_PATH 指向二进制路径。\n"
+            "下载: https://github.com/ggerganov/llama.cpp/releases"
+        )
+
+    port = 8080
+    # 检查端口是否已被占用，自动递增
+    while True:
+        import socket
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        occupied = s.connect_ex(("127.0.0.1", port)) == 0
+        s.close()
+        if not occupied:
+            break
+        port += 1
+
+    print(f"[GGUF] 启动 llama-server: {server_bin}")
+    print(f"[GGUF] 端口: {port}, 模型: {MODEL_PATH}")
+
+    # llama-server 输出写入日志文件（不能用 PIPE：没人读取会堵塞进程，且超时后无法看到原因）
+    _log_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "llama-server.log")
+    _logf = open(_log_path, "a", encoding="utf-8", errors="replace")
+    # GPU 显存层数：默认全量卸载；显存不足时可调低（如 DEEPANALYZE_NGL=60/0）
+    _ngl = os.environ.get("DEEPANALYZE_NGL", "99")
+    _llama_proc = subprocess.Popen(
+        [server_bin, "-m", MODEL_PATH, "--port", str(port),
+         "-ngl", _ngl, "-c", str(_CONTEXT), "--host", "127.0.0.1",
+         # 只开 1 个推理槽位：应用是串行请求（每节点一个 worker 线程），
+         # 默认 4 槽 × 64K 上下文的 KV 缓存占显存巨大（日志里出现过 Vulkan OOM），
+         # 单槽省下约 3/4 的 KV 显存，降低启动/自愈重启失败概率
+         "--parallel", "1",
+         # 服务端禁用 Qwen3 思考模式（请求级 chat_template_kwargs 对部分模型无效）
+         "--chat-template-kwargs", '{"enable_thinking": %s}' % ("true" if _ENABLE_LOCAL_THINKING else "false")],
+        stdout=_logf, stderr=subprocess.STDOUT,
+        text=True,
+    )
+    print(f"[GGUF] llama-server 输出日志: {_log_path}")
+
+    # 等待服务就绪（最多 60 秒）
+    print("[GGUF] 等待服务就绪...")
+    deadline = time.time() + 60
+    while time.time() < deadline:
+        try:
+            import urllib.request as _ur
+            r = _ur.urlopen(f"http://127.0.0.1:{port}/health", timeout=2)
+            if r.status == 200:
+                break
+        except Exception:
+            pass
+        time.sleep(1)
+    else:
+        _llama_proc.kill()
+        # 把 llama-server 自己的最后输出带进错误信息，便于定位原因
+        _tail = ""
+        try:
+            with open(_log_path, encoding="utf-8", errors="replace") as _lf:
+                _tail = "\n".join(_lf.read().splitlines()[-25:])
+        except Exception:
+            pass
+        raise RuntimeError(
+            "llama-server 启动超时（60秒内 /health 未就绪）\n"
+            f"--- llama-server 最近输出（{_log_path}）---\n{_tail}"
+        )
+
+    # 设置全局 API URL，推理代码自动走 API 路径
+    DEEPSEEK_API_URL = f"http://127.0.0.1:{port}/v1/chat/completions"
+    _model = f"llama-server:{port}"
+    _tokenizer = f"llama-server:{port}"
+
+    print(f"[GGUF] llama-server 已就绪 -> {DEEPSEEK_API_URL}")
+
+
+def _restart_llama_server():
+    """重启本地 llama-server（流卡死自愈）：杀掉旧进程，启动全新实例。
+
+    调试模式（DeepSeek API）下为 no-op。分析流水线在本地任务失败后、
+    以及总览生成前调用，保证后续生成使用全新状态的模型服务。
+    """
+    global _llama_proc
+    if DEBUG_MODE:
+        return
+    if _llama_proc is not None:
+        try:
+            if _llama_proc.poll() is None:
+                print("[自愈] 停止旧 llama-server 进程")
+                _llama_proc.kill()
+        except Exception:
+            pass
+        _llama_proc = None
+        time.sleep(1)  # 等端口释放
+    _start_llama_server()
+
+
 def get_model_and_tokenizer():
     """懒加载本地模型（GGUF）：启动外部 llama-server 进程。调试模式下跳过。"""
     global _model, _tokenizer, MODEL_PATH
@@ -358,100 +517,11 @@ def get_model_and_tokenizer():
         print("=" * 60)
 
         # ── GGUF 模型：启动外部 llama-server 进程 ──
-        import subprocess
-        import time
+        _start_llama_server()
 
-        # 查找 llama-server 二进制（优先项目目录 llama-server/ 文件夹）
-        server_bin = os.environ.get("LLAMA_SERVER_PATH", "")
-        if not server_bin:
-            _project_dir = os.path.dirname(os.path.abspath(__file__))
-            candidates = [
-                os.path.join(_project_dir, "llama-server", "llama-server.exe"),
-                os.path.join(_project_dir, "llama-server", "llama-server"),
-                os.path.join(_project_dir, "llama-server.exe"),
-                os.path.join(_project_dir, "llama-server"),
-                "llama-server", "llama-server.exe",
-                "C:/Users/tc191/llama-cpp/llama-server.exe",
-            ]
-            for c in candidates:
-                if os.path.isfile(c) or shutil.which(c):
-                    server_bin = c
-                    break
-
-        if not server_bin:
-            raise RuntimeError(
-                "未找到 llama-server 二进制。请把 llama.cpp 的 llama-server 放到项目目录的\n"
-                "llama-server/ 文件夹（即 <项目目录>/llama-server/llama-server），\n"
-                "或设置环境变量 LLAMA_SERVER_PATH 指向二进制路径。\n"
-                "下载: https://github.com/ggerganov/llama.cpp/releases"
-            )
-
-        port = 8080
-        # 检查端口是否已被占用，自动递增
-        while True:
-            import socket
-            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            occupied = s.connect_ex(("127.0.0.1", port)) == 0
-            s.close()
-            if not occupied:
-                break
-            port += 1
-
-        print(f"[GGUF] 启动 llama-server: {server_bin}")
-        print(f"[GGUF] 端口: {port}, 模型: {MODEL_PATH}")
-
-        # llama-server 输出写入日志文件（不能用 PIPE：没人读取会堵塞进程，且超时后无法看到原因）
-        _log_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "llama-server.log")
-        _logf = open(_log_path, "a", encoding="utf-8", errors="replace")
-        # GPU 显存层数：默认全量卸载；显存不足时可调低（如 DEEPANALYZE_NGL=60/0）
-        _ngl = os.environ.get("DEEPANALYZE_NGL", "99")
-        _llama_proc = subprocess.Popen(
-            [server_bin, "-m", MODEL_PATH, "--port", str(port),
-             "-ngl", _ngl, "-c", str(_CONTEXT), "--host", "127.0.0.1",
-             # 服务端禁用 Qwen3 思考模式（请求级 chat_template_kwargs 对部分模型无效）
-             "--chat-template-kwargs", '{"enable_thinking": %s}' % ("true" if _ENABLE_LOCAL_THINKING else "false")],
-            stdout=_logf, stderr=subprocess.STDOUT,
-            text=True,
-        )
-        print(f"[GGUF] llama-server 输出日志: {_log_path}")
-
-        # 等待服务就绪（最多 60 秒）
-        print("[GGUF] 等待服务就绪...")
-        deadline = time.time() + 60
-        while time.time() < deadline:
-            try:
-                import urllib.request as _ur
-                r = _ur.urlopen(f"http://127.0.0.1:{port}/health", timeout=2)
-                if r.status == 200:
-                    break
-            except Exception:
-                pass
-            time.sleep(1)
-        else:
-            _llama_proc.kill()
-            # 把 llama-server 自己的最后输出带进错误信息，便于定位原因
-            _tail = ""
-            try:
-                with open(_log_path, encoding="utf-8", errors="replace") as _lf:
-                    _tail = "\n".join(_lf.read().splitlines()[-25:])
-            except Exception:
-                pass
-            raise RuntimeError(
-                "llama-server 启动超时（60秒内 /health 未就绪）\n"
-                f"--- llama-server 最近输出（{_log_path}）---\n{_tail}"
-            )
-
-        # 设置全局 API URL，推理代码自动走 API 路径
-        global DEEPSEEK_API_URL
-        DEEPSEEK_API_URL = f"http://127.0.0.1:{port}/v1/chat/completions"
-        _model = f"llama-server:{port}"
-        _tokenizer = f"llama-server:{port}"
-
-        # 注册退出清理
+        # 注册退出清理（引用模块级 _llama_proc，重启自愈后仍能杀掉最新进程）
         import atexit
-        atexit.register(lambda: _llama_proc.kill() if _llama_proc.poll() is None else None)
-
-        print(f"[GGUF] llama-server 已就绪 -> {DEEPSEEK_API_URL}")
+        atexit.register(lambda: _llama_proc.kill() if _llama_proc is not None and _llama_proc.poll() is None else None)
 
     return _model, _tokenizer
 
@@ -1040,14 +1110,16 @@ def _call_deepseek_api_stream(prompt, max_tokens=16384, extra_body=None):
         body = e.read().decode("utf-8") if e.fp else ""
         raise RuntimeError(f"DeepSeek API 返回错误 ({e.code}): {body}")
     # 响应体读取超时：llama-server 流卡死（连接挂着但不再发数据）时，
-    # 让 worker 在 600 秒后抛错结束，而不是永久阻塞（否则消费线程会永久等它的 done）
+    # 让 worker 在超时后抛错结束，而不是永久阻塞（否则消费线程会永久等它的 done）。
+    # 超时后上层会重启 llama-server 并降级/重试，故窗口取 240 秒（原 600 秒会让任务
+    # 停滞约 10 分钟才恢复，且容易撞上看门狗直接判死整单任务）
     try:
         import socket as _socket
-        resp.fp.raw._sock.settimeout(600)
+        resp.fp.raw._sock.settimeout(_STREAM_READ_TIMEOUT)
     except Exception:
         try:
             import socket as _socket2
-            _socket2.setdefaulttimeout(600)
+            _socket2.setdefaulttimeout(_STREAM_READ_TIMEOUT)
         except Exception:
             pass
 
@@ -1537,7 +1609,9 @@ def _stream_section_worker(q, node, t, stop_event):
     first = True
     try:
         if node["url"] is None:
-            # 主节点本地任务：直接流式推理；中止时关闭推理生成器，释放底层连接
+            # 主节点本地任务：直接流式推理；中止时关闭推理生成器，释放底层连接。
+            # 读流中断（读超时等连接类错误）直接上报并带异常对象，由主生成器统一决定：
+            # 丢弃残缺小节 → 重启 llama-server → 全新连接重新生成一次
             gen = _run_inference(t["prompt"], max_tokens=_SHEET_MAX_TOKENS, stream=True)
             try:
                 for evt, chunk in gen:
@@ -1594,7 +1668,7 @@ def _stream_section_worker(q, node, t, stop_event):
             # 节点没有产出任何文本（空输出）
             q.put(("chunk", t, node, ("text", f"\n\n### 工作表「{t['label']}」分析（节点：{node['name']}）\n\n（节点未返回有效分析内容）\n")))
     except Exception as e:
-        q.put(("error", t, node, str(e)))
+        q.put(("error", t, node, (str(e), e)))  # 附带异常对象，主生成器据此判断是否可重试（连接类错误可重试）
     finally:
         q.put(("done", t, node, None))
 
@@ -1646,17 +1720,15 @@ def _distributed_analysis_events(prep, question, output_parts, stop_event=None):
         q = task_queues[id(t)]
         node = None
         parts = []
+        sec_start = len(output_parts)
+        retried = False
         while True:
             # 超时保护：worker 异常死亡导致队列永久静默时，把该任务标记失败继续投递，
             # 避免主生成器无限阻塞（客户端永远等不到 done）
             try:
                 kind, t2, node2, arg = q.get(timeout=900)
             except queue.Empty:
-                failures += 1
-                block = f"\n\n### 工作表「{t['label']}」分析（节点：未知）\n\n⚠️ 该任务超时未返回（worker 异常），已跳过\n"
-                output_parts.append(block)
-                yield ("text", block)
-                break
+                kind, t2, node2, arg = "error", t, node or workers[0], ("该任务超时未返回（worker 异常死亡）", None)
             if node is None:
                 node = node2
             if kind == "chunk":
@@ -1672,8 +1744,37 @@ def _distributed_analysis_events(prep, question, output_parts, stop_event=None):
                         print(f"[分布式] 已投递 {deliver_cnt} 块（{t['label'][:16]}）@ {time.strftime('%H:%M:%S')}")
                     yield ("text", chunk)
             elif kind == "error":
+                msg, exc = arg if isinstance(arg, tuple) else (arg, None)
+                # 读流自愈（可靠的通道）：本地任务的流中断——实测为应用侧读流静默断流
+                # （llama-server 本身会完整生成完），属连接类错误（OSError/socket 超时）
+                # 或 worker 异常死亡。处理：丢弃残缺小节 → 重启 llama-server → 用全新
+                # 连接重新生成一次，并重新拉起该节点的取任务循环（原 worker 已退出）。
+                # 只有本地节点可重试（远程节点无法代为重启），且只重试连接类错误。
+                retryable = (
+                    not retried and not stop_event.is_set()
+                    and node2 is not None and node2.get("url") is None
+                    and (exc is None or isinstance(exc, OSError))
+                )
+                if retryable:
+                    del output_parts[sec_start:]
+                    calc_streamer.flush()
+                    retried = True
+                    parts = []
+                    sep = f"\n\n（工作表「{t['label']}」生成中断，正在重新生成……）\n\n"
+                    output_parts.append(sep)
+                    yield ("text", sep)
+                    print(f"[自愈] 工作表读流中断（{str(msg)[:80]}），重启 llama-server 后重新生成一次")
+                    try:
+                        _restart_llama_server()
+                    except Exception as e2:
+                        print(f"[自愈] llama-server 重启失败: {e2}")
+                    q = queue.Queue()
+                    threading.Thread(target=_stream_section_worker, args=(q, node2, t, stop_event), daemon=True).start()
+                    # 原 worker 线程已退出，重新拉起该节点的取任务循环，继续处理剩余工作表
+                    threading.Thread(target=_node_worker, args=(node2,), daemon=True).start()
+                    continue
                 failures += 1
-                block = f"\n\n### 工作表「{t2['label']}」分析（节点：{node2['name']}）\n\n⚠️ 该任务分析失败：{arg}\n"
+                block = f"\n\n### 工作表「{t2['label']}」分析（节点：{node2['name']}）\n\n⚠️ 该任务分析失败：{msg}\n"
                 output_parts.append(block)
                 yield ("text", block)
                 break
@@ -1689,23 +1790,48 @@ def _distributed_analysis_events(prep, question, output_parts, stop_event=None):
     intro = "\n\n---\n\n## 总览与综合结论（主节点生成）\n\n"
     output_parts.append(intro)
     yield ("text", intro)
-    ov_gen = _run_inference(_build_overview_prompt(question, sections), max_tokens=16384, stream=True)
-    try:
-        for evt, chunk in ov_gen:
-            if stop_event.is_set():
-                break  # 客户端断开：提前终止，释放模型
-            if evt == "think":
-                yield ("think", chunk)
-            else:
-                chunk = calc_streamer.feed(chunk)
-                output_parts.append(chunk)
-                yield ("text", chunk)
-    finally:
-        # 无论正常结束还是客户端断开，都关闭推理生成器，避免模型空转占用
+    # 总览是单次最长生成，也是此前卡死的高发环节。实测（llama-server.log）表明：
+    # llama-server 会完整生成完，卡的是应用侧读流（连接静默断流）。因此首次直接用
+    # 现有服务；若读流中断（读超时）→ 清掉残缺总览、重启 llama-server、用全新连接
+    # 重新生成一次；仍失败才降级为提示块，保住分项报告而不是整单任务报错
+    ov_prompt = _build_overview_prompt(question, sections)
+    ov_parts_start = len(output_parts)
+    for ov_attempt in range(2):
         try:
-            ov_gen.close()
-        except BaseException:
-            pass
+            if ov_attempt == 1 and not DEBUG_MODE:
+                _restart_llama_server()  # 重试前换全新 llama-server 与全新连接
+            ov_gen = _run_inference(ov_prompt, max_tokens=16384, stream=True)
+            try:
+                for evt, chunk in ov_gen:
+                    if stop_event.is_set():
+                        break  # 客户端断开：提前终止，释放模型
+                    if evt == "think":
+                        yield ("think", chunk)
+                    else:
+                        chunk = calc_streamer.feed(chunk)
+                        output_parts.append(chunk)
+                        yield ("text", chunk)
+            finally:
+                # 无论正常结束还是客户端断开，都关闭推理生成器，避免模型空转占用
+                try:
+                    ov_gen.close()
+                except BaseException:
+                    pass
+            break  # 总览生成成功
+        except Exception as e:
+            if ov_attempt >= 1 or stop_event.is_set():
+                note = f"\n\n⚠️ 总览生成失败：{str(e)[:200]}\n"
+                output_parts.append(note)
+                yield ("text", note)
+                break
+            # 首次失败：丢弃本次已投递的残缺总览（报告里不能出现两段总览），
+            # 清空 calc 流式暂存，提示后重新生成
+            del output_parts[ov_parts_start:]
+            calc_streamer.flush()
+            sep = "\n\n（总览生成中断，正在重新生成……）\n\n"
+            output_parts.append(sep)
+            yield ("text", sep)
+            print(f"[自愈] 总览生成中断（{type(e).__name__}），重启 llama-server 后重新生成一次")
 
     # 冲刷尾部暂存（未闭合标记的兜底替换）
     tail = calc_streamer.flush()
@@ -2126,7 +2252,7 @@ def analyze_followup():
 _JOBS = {}
 
 
-def _job_watchdog(job_id, job, idle_limit=600):
+def _job_watchdog(job_id, job, idle_limit=720):
     """任务看门狗：事件列表长时间不增长且任务未完成 → 停滞。
 
     置位 stop_event 释放模型（worker 在块边界停止），并把任务标记为错误，
