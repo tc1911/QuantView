@@ -1488,19 +1488,24 @@ class _CalcStreamer:
     def feed(self, text):
         out = self._buf + text
         self._buf = ""
+        # 归一化完整闭合的 {% calc %}...{% endcalc %} 与 {% calc: ... %} 变体（不完整的留给尾部暂存）
+        out = _normalize_calc_forms(out)
         while True:
             m = re.search(r"\{\{calc:\s*([^}]+?)\s*\}\}", out)
             if not m:
                 break
             out = out[:m.start()] + _eval_calc_markers(m.group(0)) + out[m.end():]
-        # 尾部可能是未闭合标记的开头（含被截断的前缀 "{{ca" 或完整开头 "{{calc: 8500"）：暂存等待下个块补全
+        # 尾部可能是未闭合标记的开头（含被截断的前缀 "{{ca" 或完整开头 "{{calc: 8500"、"{%"）：暂存等待下个块补全
         # 注意要匹配 "{{" 整体（rfind("{") 会命中第二个 { 导致 tail 从 "{calc..." 开始）
         idx = out.rfind("{{")
+        idx2 = out.rfind("{%")
+        if idx2 > idx:
+            idx = idx2
         if idx == -1:
             idx = out.rfind("{")
         if idx != -1:
             tail = out[idx:]
-            if tail.startswith("{{calc:") or "{{calc:".startswith(tail):
+            if tail.startswith("{{calc:") or "{{calc:".startswith(tail) or tail.startswith("{%") or "{% calc".startswith(tail):
                 self._buf = tail
                 out = out[:idx]
         return out
