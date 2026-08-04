@@ -2109,6 +2109,156 @@ def analyze_followup():
     )
 
 
+# ── 轮询式分析（任务在后台线程执行，前端轮询取增量事件） ──
+# 背景：超长 SSE 连接在部分浏览器/系统环境下 ~5 分钟静默断流（服务端写阻塞、worker 继续空算），
+# 轮询方式每次都是短连接，从根上规避该问题。
+_JOBS = {}
+
+
+def _job_worker(job_id, prep, question, session_id, distributed, stop_event):
+    job = _JOBS[job_id]
+    model_output_parts = []
+    try:
+        job["events"].append({"type": "meta", "mode": "distributed" if distributed else "single",
+                              "nodes": [n["name"] for n in _distributed_nodes()],
+                              "split": True, "session": session_id})
+        header = "\n".join([
+            "=" * 60, "QuantView 数据分析报告", "=" * 60, "",
+            f"分析文件 ({len(prep['filenames'])} 个): {', '.join(prep['filenames'])}",
+            f"分析问题: {question}",
+            f"数据总量: {prep['total_rows']} 行 × {prep['total_cols']} 列",
+            "", "-" * 40, "AI 分析正文", "-" * 40, "",
+        ])
+        job["events"].append({"type": "text", "content": header})
+        for evt_type, chunk in _distributed_analysis_events(prep, question, model_output_parts, stop_event):
+            if stop_event.is_set():
+                break
+            if evt_type == "think":
+                job["events"].append({"type": "think", "content": chunk})
+            elif evt_type == "progress":
+                job["events"].append({"type": "progress", "done": chunk["done"], "total": chunk["total"]})
+            else:
+                job["events"].append({"type": "text", "content": chunk})
+        if not stop_event.is_set():
+            full_output = "".join(model_output_parts)
+            full_output = _eval_calc_markers(full_output)
+            if not full_output or not full_output.strip():
+                full_output = "（模型未生成有效回复，请重试）"
+            _SESSIONS[session_id]["report"] = full_output
+            _persist_session(session_id)
+            job["events"].append({"type": "text", "content": "\n\n" + "-" * 40 + "\n报告生成完毕\n" + "-" * 40})
+            all_charts = _generate_charts_from_json(full_output)
+            if not all_charts:
+                for fname, df in prep["dataframes"]:
+                    prefix = fname if len(prep["dataframes"]) > 1 else ""
+                    try:
+                        all_charts.extend(_generate_charts(df, prefix=prefix))
+                    except Exception as e:
+                        print(f"[图表] {fname} 图表生成失败: {e}")
+            if all_charts:
+                job["events"].append({"type": "charts", "images": all_charts})
+            try:
+                threading.Thread(target=_send_report_email,
+                                 args=(question, prep["filenames"], full_output, all_charts),
+                                 daemon=True).start()
+            except Exception:
+                pass
+    except Exception as e:
+        import traceback
+        print(f"[Job Error] {traceback.format_exc()}")
+        job["error"] = str(e)
+    finally:
+        stop_event.set()
+        job["done"] = True
+        job["session"] = session_id
+
+
+@app.route("/analyze/start", methods=["POST"])
+def analyze_start():
+    """轮询式分析启动：后台线程执行分析，返回 job id，前端轮询 /analyze/poll 取增量事件。"""
+    files = request.files.getlist("files")
+    if not files or all(f.filename == "" for f in files):
+        return jsonify({"error": "未检测到上传文件"}), 400
+    valid_files = []
+    for f in files:
+        if f.filename == "":
+            continue
+        if not allowed_file(f.filename):
+            return jsonify({"error": f"不支持的文件格式: {f.filename}"}), 400
+        valid_files.append(f)
+    if not valid_files:
+        return jsonify({"error": "未选择有效的文件"}), 400
+    question = request.form.get("question", "").strip()
+    if not question:
+        return jsonify({"error": "分析问题不能为空"}), 400
+    print(f"[分析] /analyze/start 收到问题: {question[:80]}")
+
+    from werkzeug.datastructures import FileStorage as _FS
+    file_buffers = []
+    fresh_files = []
+    for f in valid_files:
+        buf = io.BytesIO()
+        f.save(buf)
+        data = buf.getvalue()
+        file_buffers.append((f.filename, data))
+        fresh_files.append(_FS(stream=io.BytesIO(data), filename=f.filename))
+    valid_files = fresh_files
+
+    distributed = bool(_distributed_nodes())
+    try:
+        prep = _prepare_distributed_input(valid_files, question)
+    except Exception as e:
+        return jsonify({"error": f"数据准备失败: {str(e)}"}), 500
+
+    session_id = _new_followup_session(file_buffers)
+    job_id = os.urandom(8).hex()
+    stop_event = threading.Event()
+    _JOBS[job_id] = {"events": [], "done": False, "error": None, "session": None,
+                     "created": time.time(), "stop_event": stop_event}
+    # 清理旧任务（最多保留 8 个）
+    if len(_JOBS) > 8:
+        for old in sorted(_JOBS, key=lambda k: _JOBS[k]["created"])[:len(_JOBS) - 8]:
+            _JOBS.pop(old, None)
+    threading.Thread(target=_job_worker,
+                     args=(job_id, prep, question, session_id, distributed, stop_event),
+                     daemon=True).start()
+    return jsonify({"job": job_id})
+
+
+@app.route("/analyze/poll", methods=["GET"])
+def analyze_poll():
+    """轮询取增量事件：?job=xxx&from=N → {from, done, error, events:[...]}"""
+    job_id = request.args.get("job", "")
+    job = _JOBS.get(job_id)
+    if not job:
+        return jsonify({"error": "任务不存在或已过期"}), 404
+    try:
+        from_idx = int(request.args.get("from", 0) or 0)
+    except (TypeError, ValueError):
+        from_idx = 0
+    events = job["events"][from_idx:]
+    return jsonify({
+        "job": job_id,
+        "from": from_idx + len(events),
+        "done": job["done"],
+        "error": job["error"],
+        "session": job["session"],
+        "events": events,
+    })
+
+
+@app.route("/analyze/cancel", methods=["POST"])
+def analyze_cancel():
+    """取消后台分析任务（置位 stop_event，worker 提前终止释放模型）。"""
+    data = request.get_json(silent=True) or {}
+    job_id = data.get("job") or request.form.get("job", "")
+    job = _JOBS.get(job_id)
+    if job:
+        job["stop_event"].set()
+        print(f"[分析] 任务 {job_id[:8]} 已取消")
+    return jsonify({"ok": True})
+
+
 @app.route("/analyze/stream", methods=["POST"])
 def analyze_stream():
     """流式分析接口 — SSE 逐字推送模型输出。"""
