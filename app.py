@@ -1039,6 +1039,17 @@ def _call_deepseek_api_stream(prompt, max_tokens=16384, extra_body=None):
     except urllib.error.HTTPError as e:
         body = e.read().decode("utf-8") if e.fp else ""
         raise RuntimeError(f"DeepSeek API 返回错误 ({e.code}): {body}")
+    # 响应体读取超时：llama-server 流卡死（连接挂着但不再发数据）时，
+    # 让 worker 在 600 秒后抛错结束，而不是永久阻塞（否则消费线程会永久等它的 done）
+    try:
+        import socket as _socket
+        resp.fp.raw._sock.settimeout(600)
+    except Exception:
+        try:
+            import socket as _socket2
+            _socket2.setdefaulttimeout(600)
+        except Exception:
+            pass
 
     chunk_count = 0
     think_count = 0
@@ -2115,6 +2126,29 @@ def analyze_followup():
 _JOBS = {}
 
 
+def _job_watchdog(job_id, job, idle_limit=600):
+    """任务看门狗：事件列表长时间不增长且任务未完成 → 停滞。
+
+    置位 stop_event 释放模型（worker 在块边界停止），并把任务标记为错误，
+    让前端轮询拿到错误提示，而不是永久等待。独立线程，不受任务线程卡死影响。
+    """
+    last_len = 0
+    last_change = time.time()
+    while not job["done"]:
+        time.sleep(30)
+        n = len(job["events"])
+        if n != last_len:
+            last_len = n
+            last_change = time.time()
+        elif time.time() - last_change > idle_limit:
+            job["stop_event"].set()
+            if not job["done"]:
+                job["error"] = "分析任务停滞（服务端异常，可能为模型连接卡死），已中止释放模型，请重试"
+                job["done"] = True
+                print(f"[分析] 任务 {job_id[:8]} 停滞超时（{int(idle_limit)} 秒无进展），已中止")
+            return
+
+
 def _job_worker(job_id, prep, question, session_id, distributed, stop_event):
     job = _JOBS[job_id]
     model_output_parts = []
@@ -2222,6 +2256,7 @@ def analyze_start():
     threading.Thread(target=_job_worker,
                      args=(job_id, prep, question, session_id, distributed, stop_event),
                      daemon=True).start()
+    threading.Thread(target=_job_watchdog, args=(job_id, _JOBS[job_id]), daemon=True).start()
     return jsonify({"job": job_id})
 
 
