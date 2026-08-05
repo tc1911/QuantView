@@ -27,6 +27,7 @@ import time
 import re
 import queue
 import threading
+from werkzeug.serving import WSGIRequestHandler  # 轮询日志折叠（_PollCompactingHandler）
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from file_processing import (
@@ -2647,11 +2648,46 @@ def export_docx():
     return jsonify({"error": "Word 导出脚本未找到，请安装 export_docx.py"}), 500
 
 
+class _PollCompactingHandler(WSGIRequestHandler):
+    """轮询请求压缩显示：连续相同的 /analyze/poll 请求合并为一行（末尾 xN 计数），
+    其他请求保持 werkzeug 默认格式——避免控制台被每 3 秒一条的轮询日志刷屏。
+    注意：werkzeug 每个请求新建 handler 实例，聚合状态必须挂在类属性上。"""
+
+    _lock = threading.Lock()
+    _pending = None  # (key, count) —— 类级状态，跨请求共享
+
+    def log_request(self, code="-", size="-"):
+        cls = type(self)
+        if self.path.startswith("/analyze/poll"):
+            key = f"{self.requestline} {code} {size}".strip()
+            with cls._lock:
+                if cls._pending is not None and cls._pending[0] == key:
+                    cls._pending = (key, cls._pending[1] + 1)
+                else:
+                    self._flush_pending()
+                    cls._pending = (key, 1)
+        else:
+            with cls._lock:
+                self._flush_pending()
+            super().log_request(code, size)
+
+    def _flush_pending(self):
+        cls = type(self)
+        if cls._pending is None:
+            return
+        key, n = cls._pending
+        cls._pending = None
+        line = f'{self.client_address[0]} - - [{self.log_date_time_string()}] "{key}"'
+        if n > 1:
+            line += f" x{n}"
+        print(line)
+
+
 if __name__ == "__main__":
     print("=" * 60)
     print("QuantView - 本地数据分析助手")
     print("=" * 60)
-    print("[版本] 自愈通道 v3（读超时240s · 断流自动重试 · 单槽推理 · 僵尸清理默认关）")
+    print("[版本] 自愈通道 v4（读超时240s · 断流自愈 · 单槽推理 · 轮询折叠）")
     print()
     _port = int(os.environ.get("DEEPANALYZE_PORT", "5000"))
     if _HEADLESS:
@@ -2671,9 +2707,13 @@ if __name__ == "__main__":
     # 优先用 waitress（固定线程池，避免 werkzeug 每请求新建线程导致的长期运行线程风暴）；
     # 未安装时回退 werkzeug 开发服务器
     try:
+        import logging
+        logging.getLogger("waitress").setLevel(logging.WARNING)  # 关掉 waitress 逐请求访问日志（轮询会刷屏）
         from waitress import serve
         print(f"[服务] 使用 waitress（固定线程池，适合长时间分析）")
         serve(app, host="0.0.0.0", port=_port, threads=8)
     except ImportError:
-        # 端口可用 DEEPANALYZE_PORT 覆盖（多实例/分布式同机部署时需要）
-        app.run(host="0.0.0.0", port=_port, debug=False)
+        # 端口可用 DEEPANALYZE_PORT 覆盖（多实例/分布式同机部署时需要）；
+        # 轮询请求折叠显示（连续相同的 /analyze/poll 合并为一行 xN），其他请求保持默认格式
+        from werkzeug.serving import run_simple
+        run_simple("0.0.0.0", _port, app, threaded=True, request_handler=_PollCompactingHandler)
