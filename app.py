@@ -1563,20 +1563,89 @@ def _prepare_distributed_input_impl(valid_files, question):
 def _safe_eval_arith(expr):
     """安全计算四则运算表达式（仅数字、+ - * / %、括号、小数点）。
 
-    用 ast 校验节点类型后再求值，杜绝 eval 任意代码（防 prompt 注入）。
+    用线性递归下降求值器替代 ast.parse：实测 ast.parse 对超长/畸形表达式存在
+    病态耗时（卡死 12+ 分钟且持 GIL 冻结整个进程的所有线程），递归下降是纯线性
+    扫描，任何输入都即时返回；且不经过 eval/ast，无代码注入风险。
     % 视为除以100（如 8500/19500% = 0.0044...）。
+    表达式超过 300 字符视为异常（模型不应输出如此长的算式）。
     """
-    import ast as _ast
-    expr = str(expr).replace("%", "/100")
-    tree = _ast.parse(expr, mode="eval")
-    allowed = (_ast.Expression, _ast.BinOp, _ast.UnaryOp, _ast.Constant,
-               _ast.Add, _ast.Sub, _ast.Mult, _ast.Div, _ast.USub, _ast.UAdd)
-    for node in _ast.walk(tree):
-        if not isinstance(node, allowed):
-            raise ValueError(f"不支持的表达式: {expr}")
-        if isinstance(node, _ast.Constant) and not isinstance(node.value, (int, float)):
-            raise ValueError(f"非数值: {expr}")
-    return eval(compile(tree, "<calc>", "eval"), {"__builtins__": {}})
+    expr = str(expr).replace("%", "/100").strip()
+    if not expr:
+        raise ValueError("空表达式")
+    if len(expr) > 300:
+        raise ValueError("表达式过长")
+    pos = 0
+    n = len(expr)
+
+    def _skip():
+        nonlocal pos
+        while pos < n and expr[pos] == " ":
+            pos += 1
+
+    def _num():
+        nonlocal pos
+        _skip()
+        start = pos
+        while pos < n and (expr[pos].isdigit() or expr[pos] == "."):
+            pos += 1
+        if start == pos:
+            raise ValueError(f"非法字符: {expr[pos] if pos < n else '结尾'}")
+        return float(expr[start:pos])
+
+    def _atom():
+        nonlocal pos
+        _skip()
+        if pos < n and expr[pos] in "+-":  # 一元正负号
+            sign = -1 if expr[pos] == "-" else 1
+            pos += 1
+            v = _atom()
+            return -v if sign == -1 else v
+        if pos < n and expr[pos] == "(":
+            pos += 1
+            v = _expr()
+            _skip()
+            if pos >= n or expr[pos] != ")":
+                raise ValueError("括号不匹配")
+            pos += 1
+            return v
+        return _num()
+
+    def _term():
+        nonlocal pos
+        v = _atom()
+        while True:
+            _skip()
+            if pos < n and expr[pos] in "*/":
+                op = expr[pos]
+                pos += 1
+                r = _atom()
+                v = v * r if op == "*" else v / r
+            else:
+                return v
+
+    def _expr():
+        nonlocal pos
+        _skip()
+        sign = 1
+        if pos < n and expr[pos] in "+-":
+            sign = -1 if expr[pos] == "-" else 1
+            pos += 1
+        v = _term() * sign
+        while True:
+            _skip()
+            if pos < n and expr[pos] in "+-":
+                op = expr[pos]
+                pos += 1
+                r = _term()
+                v = v + r if op == "+" else v - r
+            else:
+                return v
+
+    v = _expr()
+    _skip()
+    if pos != n:
+        raise ValueError(f"多余字符: {expr[pos:]}")
+    return v
 
 
 def _normalize_calc_forms(text):
@@ -1591,8 +1660,12 @@ def _normalize_calc_forms(text):
 def _eval_calc_markers(text):
     """把文本中所有 {{calc: 表达式}} 标记替换为计算结果（先归一化 {% calc %} 等变体）。"""
     def _repl(m):
+        expr = m.group(1)
+        # 表达式超长直接替换为提示，禁止进入求值器（防 ast 类病态耗时，虽求值器已线性）
+        if len(expr) > 300:
+            return "（算式过长，已跳过计算）"
         try:
-            val = _safe_eval_arith(m.group(1))
+            val = _safe_eval_arith(expr)
         except Exception:
             return m.group(0)  # 计算失败保留原文（正常不应发生）
         if isinstance(val, float):
@@ -1612,6 +1685,12 @@ class _CalcStreamer:
         self._buf = ""
 
     def feed(self, text):
+        # 防呆：暂存区超大（模型输出了未闭合的巨型 calc 标记，如 "{{calc: " 后跟超长文本）
+        # 时直接当作普通文本输出，避免缓冲区无限增长与每次扫描 O(n) 累积
+        if len(self._buf) > 2000:
+            out = self._buf + text
+            self._buf = ""
+            return out
         out = self._buf + text
         self._buf = ""
         # 归一化完整闭合的 {% calc %}...{% endcalc %} 与 {% calc: ... %} 变体（不完整的留给尾部暂存）
@@ -2701,7 +2780,7 @@ if __name__ == "__main__":
     print("=" * 60)
     print("QuantView - 本地数据分析助手")
     print("=" * 60)
-    print("[版本] 自愈通道 v5（读超时240s · 断流自愈 · 单槽推理 · 轮询折叠 · 停滞堆栈转储）")
+    print("[版本] 自愈通道 v6（calc线性求值 · 读超时240s · 断流自愈 · 单槽推理 · 停滞堆栈转储）")
     print()
     _port = int(os.environ.get("DEEPANALYZE_PORT", "5000"))
     if _HEADLESS:
