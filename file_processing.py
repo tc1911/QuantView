@@ -429,6 +429,37 @@ def extract_hard_numbers_core(stream):
                                 last_pd = col_periods[_i]
                             elif col_periods[_i] is None and last_pd is not None:
                                 col_periods[_i] = last_pd
+                # 转置表布局检测：行=期别、列=指标名（如应收账龄表：行 2026上半年/2025下半年，
+                # 列 1个月内/1-2个月…；周转天数表：列 锂电/氟化学/合并）。当检测到的列期别不是
+                # 期别标签、而行标签为期别时，按转置方式提取（列头当指标名、行标签当期别），
+                # 否则模型会把账龄段/板块当"期别"、把期别当"指标名"，导致标签错位
+                _is_pd = lambda s: bool(re.match(r"^\d{4}(?:上|下)半年$", s)) or s in ("同比", "环比")
+                _transposed = False
+                _col_headers = [None] * (_max_col - 1)
+                if col_periods and not any(_is_pd(p) for p in col_periods if p):
+                    for _ri in range(min(3, len(sdf))):
+                        _lb = ""
+                        for _c in sdf.columns[:5]:
+                            _v = sdf.iloc[_ri][_c]
+                            if pd.notna(_v) and isinstance(_v, str) and _v.strip():
+                                _lb = _v.strip()
+                                break
+                        if _is_pd(_lb):
+                            _transposed = True
+                            break
+                    # 捕获首个表头行的原始列名（转置模式用列头当指标名）
+                    for _ri in range(min(3, len(sdf))):
+                        _hd = []
+                        for _c in list(sdf.columns)[1:_max_col]:
+                            _v = sdf.iloc[_ri][_c]
+                            if pd.notna(_v) and isinstance(_v, str) and _v.strip() \
+                                    and not _v.strip().replace(".", "").replace("-", "").isdigit():
+                                _hd.append(_v.strip())
+                            else:
+                                _hd.append(None)
+                        if sum(1 for h in _hd if h) >= 2:
+                            _col_headers = _hd
+                            break
                 seen = set()
                 last_section = ""
                 section_context = ""  # 段落标题（用于合计行上下文）
@@ -459,7 +490,10 @@ def extract_hard_numbers_core(stream):
                             "折旧费用", "车辆费用", "租赁费用", "摊销费用", "包装费用",
                             "运输费用", "产品认证费",
                             "工资", "年终奖金", "股权激励", "社会保险费", "住房公积金",
-                            "福利费", "工会经费", "职工教育经费", "其他费用"}
+                            "福利费", "工会经费", "职工教育经费", "其他费用",
+                            # 生产成本表：氟化学/锂电两套同名成本明细，必须带板块前缀区分
+                            #（否则锂电的直接材料 73000 会被同名去重丢弃，模型只能引用氟化学的 23300）
+                            "直接材料", "直接人工", "制造费用", "直接折旧", "燃料动力", "直接包材"}
                 for _ri in range(min(len(sdf), 80)):
                     row = sdf.iloc[_ri]
                     label = ""
@@ -479,6 +513,59 @@ def extract_hard_numbers_core(stream):
                             if _u and len(_u) <= 10:
                                 cur_unit = _u
                             break
+                    # ── 转置表（行=期别、列=指标名）提取 ──
+                    if _transposed:
+                        # 表头行（无数值、≥2 个文本列）→ 更新列名（同一张表内各数据块表头不同）
+                        _has_num = False
+                        _txts = []
+                        for _c in list(sdf.columns)[1:_max_col]:
+                            _v = row[_c]
+                            if pd.notna(_v):
+                                _vs = str(_v).strip()
+                                if not _vs:
+                                    continue
+                                try:
+                                    float(_vs)
+                                    _has_num = True
+                                except (ValueError, TypeError):
+                                    if 2 <= len(_vs) <= 14:
+                                        _txts.append((_c, _vs))
+                        if not _has_num and len(_txts) >= 2:
+                            _col_headers = [None] * (_max_col - 1)
+                            _ci = 0
+                            for _c in list(sdf.columns)[1:_max_col]:
+                                _v = row[_c]
+                                if pd.notna(_v) and isinstance(_v, str) and _v.strip() and 2 <= len(_v.strip()) <= 14:
+                                    _col_headers[_ci] = _v.strip()
+                                _ci += 1
+                            continue
+                        if _is_pd(label):
+                            # 行标签=期别（2026上半年/2025下半年/同比/环比），列头=指标名
+                            for _ci, _c in enumerate(list(sdf.columns)[1:_max_col]):
+                                if _ci >= len(_col_headers) or not _col_headers[_ci]:
+                                    continue
+                                _v = row[_c]
+                                if pd.notna(_v):
+                                    try:
+                                        _nv = float(_v)
+                                    except (ValueError, TypeError):
+                                        continue
+                                    _hk = f"{cur_unit}·{_col_headers[_ci]}·{label}"
+                                    if _hk in seen:
+                                        continue
+                                    seen.add(_hk)
+                                    if abs(_nv) < 0.01 and _nv != 0:
+                                        continue
+                                    if _nv == int(_nv):
+                                        _vs = str(int(_nv))
+                                    else:
+                                        _vs = f"{_nv:.4f}".rstrip("0").rstrip(".")
+                                    _u_sfx = ""
+                                    if cur_unit and cur_unit not in ("万元", "元"):
+                                        _u_sfx = f"·{cur_unit}"
+                                    lines.append(f"  {_col_headers[_ci]}{_u_sfx}({label}={_vs})")
+                            continue
+                        # 非期别行（块标题/单位行）交给常规逻辑处理
                     # 表头行重检测：整表共用一份 col_periods 会误标中途的新表头块
                     #（如税收表"税种|2026下半年预算|2025下半年实际|同比"、固投第二个项目块），
                     # 无数值且含 ≥2 个期别词的文本行视为新表头，更新列期别
