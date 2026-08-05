@@ -2649,23 +2649,22 @@ def export_docx():
 
 
 class _PollCompactingHandler(WSGIRequestHandler):
-    """轮询请求压缩显示：连续相同的 /analyze/poll 请求合并为一行（末尾 xN 计数），
-    其他请求保持 werkzeug 默认格式——避免控制台被每 3 秒一条的轮询日志刷屏。
+    """轮询请求无限折叠：所有 /analyze/poll 请求（无论 from 如何变化）只累计计数，
+    不逐条打印；直到出现其他请求（/analyze/start、图表、导出等）打断时，输出一行
+    汇总（含累计次数与最近一次请求），计数从零重新开始。
     注意：werkzeug 每个请求新建 handler 实例，聚合状态必须挂在类属性上。"""
 
     _lock = threading.Lock()
-    _pending = None  # (key, count) —— 类级状态，跨请求共享
+    _pending = None  # (count, last_key) —— 类级状态，跨请求共享
 
     def log_request(self, code="-", size="-"):
         cls = type(self)
         if self.path.startswith("/analyze/poll"):
             key = f"{self.requestline} {code} {size}".strip()
             with cls._lock:
-                if cls._pending is not None and cls._pending[0] == key:
-                    cls._pending = (key, cls._pending[1] + 1)
-                else:
-                    self._flush_pending()
-                    cls._pending = (key, 1)
+                if cls._pending is None:
+                    cls._pending = (0, key)
+                cls._pending = (cls._pending[0] + 1, key)
         else:
             with cls._lock:
                 self._flush_pending()
@@ -2675,12 +2674,9 @@ class _PollCompactingHandler(WSGIRequestHandler):
         cls = type(self)
         if cls._pending is None:
             return
-        key, n = cls._pending
+        n, last_key = cls._pending
         cls._pending = None
-        line = f'{self.client_address[0]} - - [{self.log_date_time_string()}] "{key}"'
-        if n > 1:
-            line += f" x{n}"
-        print(line)
+        print(f'[轮询] {self.log_date_time_string()} 共 {n} 次（最近: {last_key}）')
 
 
 if __name__ == "__main__":
