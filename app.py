@@ -2310,6 +2310,16 @@ def _job_watchdog(job_id, job, idle_limit=720):
             last_len = n
             last_change = time.time()
         elif time.time() - last_change > idle_limit:
+            # 停滞现场抓取：转储全部线程堆栈（能看到主生成器/worker 各卡在哪一行），
+            # 以及任务状态（事件数、最后事件），供定位"投递线程静默冻结"类问题
+            try:
+                import faulthandler
+                print(f"[分析] 任务 {job_id[:8]} 停滞超时，线程堆栈如下：")
+                faulthandler.dump_traceback()
+                last_evt = job["events"][-1] if job["events"] else None
+                print(f"[分析] 任务 {job_id[:8]} 停滞时事件数={len(job['events'])}，最后事件={str(last_evt)[:200]}")
+            except Exception as e:
+                print(f"[分析] 停滞现场抓取失败: {e}")
             job["stop_event"].set()
             if not job["done"]:
                 job["error"] = "分析任务停滞（服务端异常，可能为模型连接卡死），已中止释放模型，请重试"
