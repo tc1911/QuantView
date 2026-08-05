@@ -2701,7 +2701,7 @@ if __name__ == "__main__":
     print("=" * 60)
     print("QuantView - 本地数据分析助手")
     print("=" * 60)
-    print("[版本] 自愈通道 v4（读超时240s · 断流自愈 · 单槽推理 · 轮询折叠）")
+    print("[版本] 自愈通道 v5（读超时240s · 断流自愈 · 单槽推理 · 轮询折叠 · 停滞堆栈转储）")
     print()
     _port = int(os.environ.get("DEEPANALYZE_PORT", "5000"))
     if _HEADLESS:
