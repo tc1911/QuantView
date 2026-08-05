@@ -1651,28 +1651,78 @@ def _safe_eval_arith(expr):
 def _normalize_calc_forms(text):
     """把模型误用的其他 calc 标记格式归一化为 {{calc: 表达式}}：
     {% calc %}表达式{% endcalc %} 与 {% calc: 表达式 %} 两种。
+    纯线性 str.find 扫描（不用正则：正则回溯存在病态耗时风险，实测卡死整个进程）。
     """
-    text = re.sub(r"\{%\s*calc\s*%\}\s*([\s\S]*?)\s*\{%\s*endcalc\s*%\}", lambda m: "{{calc: " + m.group(1).strip() + "}}", text)
-    text = re.sub(r"\{%\s*calc\s*[:：]\s*([^%}]+?)\s*%\}", lambda m: "{{calc: " + m.group(1).strip() + "}}", text)
-    return text
+    out = []
+    pos = 0
+    while True:
+        i = text.find("{%", pos)
+        if i == -1:
+            out.append(text[pos:])
+            return "".join(out)
+        j = text.find("%}", i + 2)
+        if j == -1:
+            out.append(text[pos:])
+            return "".join(out)
+        inner = text[i + 2:j].strip().lower()
+        if inner == "calc":
+            # {% calc %}表达式{% endcalc %}
+            k = text.find("{%", j + 2)
+            m = text.find("%}", k + 2) if k != -1 else -1
+            if k != -1 and m != -1 and text[k + 2:m].strip().lower() == "endcalc":
+                out.append(text[pos:i])
+                out.append("{{calc: " + text[j + 2:k].strip() + "}}")
+                pos = m + 2
+                continue
+            out.append(text[pos:i + 2])  # 非完整块：当作普通文本
+            pos = i + 2
+        elif inner.startswith("calc:") or inner.startswith("calc："):
+            # {% calc: 表达式 %}
+            out.append(text[pos:i])
+            out.append("{{calc: " + inner[5:].strip() + "}}")
+            pos = j + 2
+        else:
+            out.append(text[pos:i + 2])
+            pos = i + 2
 
 
-def _eval_calc_markers(text):
-    """把文本中所有 {{calc: 表达式}} 标记替换为计算结果（先归一化 {% calc %} 等变体）。"""
-    def _repl(m):
-        expr = m.group(1)
-        # 表达式超长直接替换为提示，禁止进入求值器（防 ast 类病态耗时，虽求值器已线性）
+def _eval_calc_markers(text, normalize=True):
+    """把文本中所有 {{calc: 表达式}} 标记替换为计算结果。
+
+    纯线性 str.find 扫描（不用正则：正则回溯存在病态耗时风险，实测卡死整个进程）；
+    表达式超 300 字符替换为提示，禁止进入求值器。
+    normalize=False 时跳过 {% calc %} 变体归一化（流式路径已归一化过）。
+    """
+    if normalize:
+        text = _normalize_calc_forms(text)
+    out = []
+    pos = 0
+    while True:
+        i = text.find("{{calc:", pos)
+        if i == -1:
+            out.append(text[pos:])
+            break
+        j = text.find("}}", i + 7)
+        if j == -1:
+            out.append(text[pos:])  # 未闭合标记：保留原文
+            break
+        out.append(text[pos:i])  # 标记前的文本原样保留
+        expr = text[i + 7:j].strip()
         if len(expr) > 300:
-            return "（算式过长，已跳过计算）"
-        try:
-            val = _safe_eval_arith(expr)
-        except Exception:
-            return m.group(0)  # 计算失败保留原文（正常不应发生）
-        if isinstance(val, float):
-            s = f"{val:.2f}".rstrip("0").rstrip(".")
-            return "0" if s == "-0" else s
-        return str(int(val))
-    return re.sub(r"\{\{calc:\s*([^}]+?)\s*\}\}", _repl, _normalize_calc_forms(text))
+            out.append("（算式过长，已跳过计算）")
+        else:
+            try:
+                val = _safe_eval_arith(expr)
+            except Exception:
+                out.append(text[i:j + 2])  # 计算失败保留原文
+            else:
+                if isinstance(val, float):
+                    s = f"{val:.2f}".rstrip("0").rstrip(".")
+                    out.append("0" if s == "-0" else s)
+                else:
+                    out.append(str(int(val)))
+        pos = j + 2
+    return "".join(out)
 
 
 class _CalcStreamer:
@@ -1695,11 +1745,8 @@ class _CalcStreamer:
         self._buf = ""
         # 归一化完整闭合的 {% calc %}...{% endcalc %} 与 {% calc: ... %} 变体（不完整的留给尾部暂存）
         out = _normalize_calc_forms(out)
-        while True:
-            m = re.search(r"\{\{calc:\s*([^}]+?)\s*\}\}", out)
-            if not m:
-                break
-            out = out[:m.start()] + _eval_calc_markers(m.group(0)) + out[m.end():]
+        # 线性 str.find 替换完整标记（不用正则，防病态回溯卡死）
+        out = _eval_calc_markers(out, normalize=False)
         # 尾部可能是未闭合标记的开头（含被截断的前缀 "{{ca" 或完整开头 "{{calc: 8500"、"{%"）：暂存等待下个块补全
         # 注意要匹配 "{{" 整体（rfind("{") 会命中第二个 { 导致 tail 从 "{calc..." 开始）
         idx = out.rfind("{{")
@@ -2780,7 +2827,7 @@ if __name__ == "__main__":
     print("=" * 60)
     print("QuantView - 本地数据分析助手")
     print("=" * 60)
-    print("[版本] 自愈通道 v6（calc线性求值 · 读超时240s · 断流自愈 · 单槽推理 · 停滞堆栈转储）")
+    print("[版本] 自愈通道 v7（calc无正则 · 读超时240s · 断流自愈 · 单槽推理 · 停滞堆栈转储）")
     print()
     _port = int(os.environ.get("DEEPANALYZE_PORT", "5000"))
     if _HEADLESS:
