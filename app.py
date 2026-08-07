@@ -1886,6 +1886,7 @@ def _distributed_analysis_events(prep, question, output_parts, stop_event=None):
     t0_consume = time.time()
     for t in tasks:
         print(f"[分布式] 开始投递任务 {done + 1}/{total}：{t['label'][:24]} @ {time.strftime('%H:%M:%S')}")
+        t_task_start = time.time()
         q = task_queues[id(t)]
         node = None
         parts = []
@@ -1952,8 +1953,11 @@ def _distributed_analysis_events(prep, question, output_parts, stop_event=None):
         if parts and node is not None:
             sections.append((t["label"], node["name"], "".join(parts).strip()))
         done += 1
-        print(f"[分布式] 任务完成 {done}/{total}：{t['label'][:24]}（本任务 {len(parts)} 字符，累计投递 {deliver_cnt} 块，耗时 {time.time()-t0_consume:.0f}s）")
-        yield ("progress", {"done": done, "total": total})
+        _dur = time.time() - t_task_start
+        _chars = len(parts)
+        _spd = _chars / _dur if _dur > 0 else 0
+        print(f"[分布式] 任务完成 {done}/{total}：{t['label'][:24]}（本任务 {_chars} 字符 · {_dur:.0f}s · 平均 {_spd:.1f} 字符/s · 累计投递 {deliver_cnt} 块 · 总耗时 {time.time()-t0_consume:.0f}s）")
+        yield ("progress", {"done": done, "total": total, "speed": round(_spd, 1)})
 
     # ── 主节点生成总览 ──
     intro = "\n\n---\n\n## 总览与综合结论（主节点生成）\n\n"
@@ -1965,6 +1969,8 @@ def _distributed_analysis_events(prep, question, output_parts, stop_event=None):
     # 重新生成一次；仍失败才降级为提示块，保住分项报告而不是整单任务报错
     ov_prompt = _build_overview_prompt(question, sections)
     ov_parts_start = len(output_parts)
+    ov_t0 = time.time()
+    _ov_chars = 0
     for ov_attempt in range(2):
         try:
             if ov_attempt == 1 and not DEBUG_MODE:
@@ -1978,6 +1984,7 @@ def _distributed_analysis_events(prep, question, output_parts, stop_event=None):
                         yield ("think", chunk)
                     else:
                         chunk = calc_streamer.feed(chunk)
+                        _ov_chars += len(chunk)
                         output_parts.append(chunk)
                         yield ("text", chunk)
             finally:
@@ -2001,6 +2008,11 @@ def _distributed_analysis_events(prep, question, output_parts, stop_event=None):
             output_parts.append(sep)
             yield ("text", sep)
             print(f"[自愈] 总览生成中断（{type(e).__name__}），重启 llama-server 后重新生成一次")
+
+    # 总览输出速度统计
+    _ov_dur = time.time() - ov_t0
+    if _ov_dur > 0:
+        print(f"[分布式] 总览生成完成（{_ov_chars} 字符 · {_ov_dur:.0f}s · 平均 {_ov_chars / _ov_dur:.1f} 字符/s）")
 
     # 冲刷尾部暂存（未闭合标记的兜底替换）
     tail = calc_streamer.flush()
@@ -2475,7 +2487,8 @@ def _job_worker(job_id, prep, question, session_id, distributed, stop_event):
             if evt_type == "think":
                 job["events"].append({"type": "think", "content": chunk})
             elif evt_type == "progress":
-                job["events"].append({"type": "progress", "done": chunk["done"], "total": chunk["total"]})
+                job["events"].append({"type": "progress", "done": chunk["done"], "total": chunk["total"],
+                                      "speed": chunk.get("speed")})
             else:
                 job["events"].append({"type": "text", "content": chunk})
         if not stop_event.is_set():

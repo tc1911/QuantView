@@ -1458,7 +1458,7 @@ console.log('[QuantView] JS loaded');
 
               var status;
               if (currentMeta && currentMeta.split) {
-                status = lastProgress ? ('分项分析中…（' + lastProgress.done + '/' + lastProgress.total + '）') : '分项分析中…';
+                status = lastProgress ? ('分项分析中…（' + lastProgress.done + '/' + lastProgress.total + (lastProgress.speed ? ' · 平均 ' + lastProgress.speed + ' 字符/s' : '') + '）') : '分项分析中…';
               } else {
                 status = inThink ? ('思考中… (' + thinkText.length + ' 字)') : ('正在分析… (' + fullText.length + ' 字)');
               }
@@ -1505,7 +1505,7 @@ console.log('[QuantView] JS loaded');
       var mbar = document.getElementById('metaProgressBar');
       if (lastProgress) {
         var mp = document.getElementById('metaProgress');
-        if (mp) mp.textContent = '分项分析完成（' + lastProgress.done + '/' + lastProgress.total + '）';
+        if (mp) mp.textContent = '分项分析完成（' + lastProgress.done + '/' + lastProgress.total + (lastProgress.speed ? ' · 平均 ' + lastProgress.speed + ' 字符/s' : '') + '）';
         if (mbar) mbar.style.width = '100%';
       } else if (mbar) {
         mbar.classList.remove('indeterminate');
@@ -1946,7 +1946,7 @@ console.log('[QuantView] JS loaded');
 
   function updateMetaProgress(p) {
     var el = document.getElementById('metaProgress');
-    if (el) el.textContent = '分项分析 ' + p.done + '/' + p.total;
+    if (el) el.textContent = '分项分析 ' + p.done + '/' + p.total + (p.speed ? ' · 平均 ' + p.speed + ' 字符/s' : '');
     var bar = document.getElementById('metaProgressBar');
     if (bar) bar.style.width = Math.round(p.done / p.total * 100) + '%';
   }
